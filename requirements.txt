@@ -1,0 +1,22 @@
+# Core app
+streamlit>=1.40.0
+pydantic>=2.7.0
+
+# Transcription (local, CPU-friendly)
+faster-whisper>=1.1.0
+av>=12.0.0
+
+# LLM providers (both optional at runtime; pick one in the sidebar)
+anthropic>=0.40.0
+openai>=1.55.0
+
+# Exports
+pandas>=2.2.0
+openpyxl>=3.1.0
+XlsxWriter>=3.2.0
+python-docx>=1.1.0
+reportlab>=4.2.0
+
+# Utilities
+python-dotenv>=1.0.0
+tenacity>=8.5.0
