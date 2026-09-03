@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 from . import prompts
 from .llm import LLMClient
-from .schema import MCQ, Chunk, format_timestamp
+from .schema import MCQ, Chunk, format_timestamp, parse_timestamp
 
 ProgressFn = Callable[[float, str], None]
 
@@ -37,6 +37,23 @@ NEGATIVE_STEM_PATTERNS = [r"\bNOT\b", r"\bEXCEPT\b", r"\bnever\b", r"\bincorrect
 # Generation
 # --------------------------------------------------------------------------- #
 
+def _build_avoid_clause(topics: list[str], stems: list[str]) -> str:
+    """Tell the model what has already been asked, so it writes something new."""
+    parts: list[str] = []
+    if topics:
+        parts.append(
+            "Do not duplicate these topics already covered: " + "; ".join(topics[-12:])
+        )
+    if stems:
+        listed = "\n".join(f"- {s}" for s in stems[-25:])
+        parts.append(
+            "These questions already exist. Write questions that test DIFFERENT "
+            "content or a different aspect of the same content — not a reworded "
+            "version of any of them:\n" + listed
+        )
+    return "\n\n".join(parts)
+
+
 def generate_questions(
     client: LLMClient,
     chunks: list[Chunk],
@@ -45,9 +62,17 @@ def generate_questions(
     bloom_targets: list[str] | None = None,
     difficulty_mix: str = "Balanced",
     course_context: str = "",
+    avoid_stems: list[str] | None = None,
     progress: ProgressFn | None = None,
 ) -> list[MCQ]:
-    """Generate questions chunk by chunk, avoiding repeats across chunks."""
+    """Generate questions chunk by chunk, avoiding repeats across chunks.
+
+    ``avoid_stems`` carries questions that already exist — from earlier chunks in
+    this run, and from a previous run when the instructor asks for an alternative
+    set. Without it, a second pass over the same lecture reliably reproduces the
+    first pass, because the salient points of a chunk are the salient points
+    whichever time you ask.
+    """
     bloom_targets = bloom_targets or ["Remember", "Understand", "Apply", "Analyze"]
     options_placeholder = ", ".join(f'"option {chr(65 + i)}"' for i in range(n_options))
     context_block = (
@@ -58,6 +83,7 @@ def generate_questions(
 
     questions: list[MCQ] = []
     seen_topics: list[str] = []
+    prior_stems = list(avoid_stems or [])
 
     for chunk, want in zip(chunks, allocation):
         if want <= 0:
@@ -69,12 +95,7 @@ def generate_questions(
                 f"Writing questions for {chunk.label}",
             )
 
-        avoid = ""
-        if seen_topics:
-            avoid = (
-                "Do not duplicate these topics already covered by earlier questions: "
-                + "; ".join(seen_topics[-12:])
-            )
+        avoid = _build_avoid_clause(seen_topics, prior_stems)
 
         try:
             data = client.complete_json(
@@ -101,12 +122,71 @@ def generate_questions(
             if item is None:
                 continue
             questions.append(item)
+            prior_stems.append(item.stem)
             if item.topic:
                 seen_topics.append(item.topic)
 
     if progress:
         progress(1.0, f"Drafted {len(questions)} questions")
     return questions
+
+
+def find_chunk_for_timestamp(chunks: list[Chunk], timestamp: str) -> Chunk | None:
+    """Locate the transcript window a question came from."""
+    if not chunks:
+        return None
+    seconds = parse_timestamp(timestamp)
+    for chunk in chunks:
+        if chunk.start <= seconds < chunk.end:
+            return chunk
+    # A malformed or out-of-range timestamp still deserves an answer.
+    return min(chunks, key=lambda c: abs(c.start - seconds))
+
+
+def generate_replacement(
+    client: LLMClient,
+    chunks: list[Chunk],
+    question: MCQ,
+    existing_stems: list[str],
+    n_options: int = 4,
+    bloom_targets: list[str] | None = None,
+    difficulty_mix: str = "Balanced",
+    course_context: str = "",
+    same_section: bool = True,
+) -> MCQ | None:
+    """Write one new question to stand in for ``question``.
+
+    By default the replacement is drawn from the same part of the lecture, so
+    swapping out a bad item does not quietly leave a hole in the coverage. Set
+    ``same_section=False`` to draw from anywhere in the recording instead.
+    """
+    if not chunks:
+        return None
+
+    if same_section:
+        chunk = find_chunk_for_timestamp(chunks, question.source_timestamp)
+        pool = [chunk] if chunk else chunks[:1]
+    else:
+        pool = chunks
+
+    avoid = [s for s in existing_stems if s]
+    for chunk in pool:
+        drafted = generate_questions(
+            client,
+            [chunk],
+            [1],
+            n_options=n_options,
+            bloom_targets=bloom_targets or [question.bloom],
+            difficulty_mix=difficulty_mix,
+            course_context=course_context,
+            avoid_stems=avoid,
+        )
+        if drafted:
+            new = drafted[0]
+            new.points = question.points
+            new.flags = validate_question(new)
+            return new
+    return None
 
 
 def _with_inline_timestamps(chunk: Chunk) -> str:

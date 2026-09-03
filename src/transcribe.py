@@ -11,10 +11,11 @@ pointer back to the moment in the lecture it came from.
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from typing import Any
 
-from .schema import Segment, Transcript
+from .schema import Segment, Transcript, TranscriptPart
 
 ProgressFn = Callable[[float, str], None]
 
@@ -99,11 +100,150 @@ def transcribe_file(
     if progress:
         progress(1.0, f"Transcription complete — {len(segments)} segments")
 
+    total = duration or segments[-1].end
+    name = os.path.basename(audio_path)
     return Transcript(
         segments=segments,
         language=str(getattr(info, "language", language or "en")),
-        duration=duration or segments[-1].end,
+        duration=total,
         model_name=getattr(model, "model_size_or_path", "faster-whisper"),
+        parts=[
+            TranscriptPart(
+                index=0, filename=name, offset=0.0, duration=total, segments=len(segments)
+            )
+        ],
+    )
+
+
+def transcribe_parts(
+    model: Any,
+    audio_paths: list[str],
+    display_names: list[str] | None = None,
+    language: str | None = None,
+    vad_filter: bool = True,
+    beam_size: int = 1,
+    progress: ProgressFn | None = None,
+) -> Transcript:
+    """Transcribe several files in order and stitch them into one transcript.
+
+    This exists because the practical ceiling on a single upload is not the
+    lecture — it is the host. Splitting a 75-minute recording into three
+    25-minute files and handing them over in order produces exactly the same
+    combined transcript as one long upload, because each part's timestamps are
+    shifted by the running total before its segments are appended. A question
+    generated from part three still points at 0:52:14 of the lecture, not
+    0:02:14 of the third file.
+
+    Files are transcribed **sequentially**, not in parallel: the Whisper model is
+    a single shared object and running it concurrently on one CPU core would be
+    slower, not faster.
+
+    Splits are assumed to be contiguous and non-overlapping. If parts overlap,
+    the overlapping speech appears twice — the near-duplicate check will flag
+    resulting questions, but trimming the overlap beforehand is better.
+    """
+    if not audio_paths:
+        raise TranscriptionError("No audio files were provided.")
+
+    names = display_names or [os.path.basename(p) for p in audio_paths]
+    if len(names) != len(audio_paths):
+        raise TranscriptionError("display_names must line up with audio_paths.")
+
+    # Probe every part first so the progress bar reflects the whole recording
+    # rather than restarting at zero for each file.
+    part_durations = [probe_duration(p) for p in audio_paths]
+    known_total = sum(d for d in part_durations if d > 0)
+
+    all_segments: list[Segment] = []
+    parts: list[TranscriptPart] = []
+    offset = 0.0
+    language_seen = language or "en"
+    failures: list[str] = []
+
+    for i, (path, name) in enumerate(zip(audio_paths, names)):
+        part_label = f"part {i + 1} of {len(audio_paths)} ({name})"
+
+        def part_progress(frac: float, message: str, _i=i, _offset=offset) -> None:
+            if progress is None:
+                return
+            if known_total > 0:
+                elapsed = _offset + frac * max(part_durations[_i], 0.0)
+                overall = min(0.99, elapsed / known_total)
+            else:
+                overall = min(0.99, (_i + frac) / len(audio_paths))
+            progress(overall, f"Transcribing {part_label} — {message}")
+
+        try:
+            part = transcribe_file(
+                model,
+                path,
+                language=language,
+                vad_filter=vad_filter,
+                beam_size=beam_size,
+                progress=part_progress,
+            )
+        except TranscriptionError as exc:
+            # One unreadable or silent part should not throw away the rest.
+            failures.append(f"{name}: {exc}")
+            continue
+
+        for seg in part.segments:
+            all_segments.append(
+                Segment(
+                    index=len(all_segments),
+                    start=seg.start + offset,
+                    end=seg.end + offset,
+                    text=seg.text,
+                    part=i,
+                )
+            )
+
+        # Prefer the container's reported duration over the last segment's end,
+        # so trailing silence in a part does not shift everything after it.
+        measured = max(part_durations[i], part.duration, part.segments[-1].end)
+        parts.append(
+            TranscriptPart(
+                index=i,
+                filename=name,
+                offset=offset,
+                duration=measured,
+                segments=len(part.segments),
+            )
+        )
+        offset += measured
+        language_seen = part.language or language_seen
+
+    if not all_segments:
+        raise TranscriptionError(
+            "No speech was detected in any part. "
+            + (" ".join(failures) if failures else "")
+        )
+
+    if progress:
+        note = f" ({len(failures)} part(s) skipped)" if failures else ""
+        progress(1.0, f"Combined {len(parts)} part(s) — {len(all_segments)} segments{note}")
+
+    return Transcript(
+        segments=all_segments,
+        language=language_seen,
+        duration=offset,
+        model_name=getattr(model, "model_size_or_path", "faster-whisper"),
+        parts=parts,
+        skipped_parts=failures,
+    )
+
+
+def natural_sort_key(name: str) -> tuple:
+    """Sort key that orders ``part2`` before ``part10``.
+
+    Split recordings are almost always named with a trailing number, and plain
+    alphabetical sorting puts part 10 immediately after part 1 — which would
+    silently scramble the middle of a lecture.
+    """
+    return tuple(
+        int(chunk) if chunk.isdigit() else chunk.lower()
+        for chunk in re.split(r"(\d+)", name)
+        if chunk != ""
     )
 
 

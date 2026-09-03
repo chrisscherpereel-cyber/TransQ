@@ -6,15 +6,22 @@ reviewable bank of multiple-choice questions you can import straight into Canvas
 
 Transcription runs **locally** with faster-whisper, so audio never leaves the
 server. Only the transcript text is sent to an LLM, and only for summarizing and
-question writing — Gemini by default, or Claude, OpenAI, Grok, or anything on
-OpenRouter.
+question writing — DeepSeek via OpenRouter by default, or Gemini, Claude,
+OpenAI, Grok, or any other model OpenRouter carries.
+
+Long recordings can be uploaded **in parts**: split a 90-minute lecture into
+three files and they are transcribed in order, then stitched into one continuous
+transcript before anything else happens.
 
 ```
-audio ──► faster-whisper ──► transcript ──► chunks ──► summary
-                                              │
-                                              └──► MCQ draft ──► review pass
-                                                                    │
-                            QTI · XLSX · CSV · DOCX · PDF · MD ◄────┘
+part 1 ─┐
+part 2 ─┼─► faster-whisper ─► stitched transcript ─► chunks ─► summary
+part 3 ─┘    (sequential)       (one timeline)         │
+                                                       └─► MCQ draft ─► review
+                                                                          │
+                                    QTI · XLSX · CSV · DOCX · PDF · MD ◄──┘
+                                                     ▲
+                             alternative sets · per-question replacement
 ```
 
 ---
@@ -23,13 +30,14 @@ audio ──► faster-whisper ──► transcript ──► chunks ──► s
 
 | Stage | Detail |
 |---|---|
-| **Transcribe** | faster-whisper (CTranslate2), segment timestamps, voice-activity filtering, live progress |
+| **Transcribe** | faster-whisper (CTranslate2), segment timestamps, voice-activity filtering, live progress. Accepts a split recording as several files and stitches them onto one timeline |
 | **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms |
-| **Generate** | Questions written per chunk with Bloom-level and difficulty targets, each carrying the timestamp and a verbatim quote that supports the answer. Provider is a dropdown: Gemini, Claude, OpenAI, Grok, OpenRouter |
+| **Generate** | Questions written per chunk with Bloom-level and difficulty targets, each carrying the timestamp and a verbatim quote that supports the answer. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
 | **Review** | An automatic second pass critiques the drafts and repairs or drops weak items |
 | **Validate** | Mechanical checks for "all of the above", duplicate options, giveaway answer length, negative stems, near-duplicate questions, missing provenance |
 | **Balance** | Correct answers are redistributed across A/B/C/D — LLMs have a strong positional bias students notice fast |
 | **Edit** | Every stem, option, and answer key is editable in the browser before export |
+| **Regenerate** | Ask for a whole alternative set (kept side by side with the first), or replace any single question with a newly written one |
 | **Export** | QTI 1.2 (Canvas) · QTI 2.1 · XLSX · CSV · DOCX · PDF · Markdown · SRT/VTT captions |
 
 Every generated question is a **draft for your review**, not a finished exam item.
@@ -46,7 +54,7 @@ cd lecture-quiz-builder
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env        # add GEMINI_API_KEY (or any other provider's key)
+cp .env.example .env        # add OPENROUTER_API_KEY (or any other provider's key)
 streamlit run app.py
 ```
 
@@ -68,11 +76,11 @@ The first run downloads the Whisper weights (~150 MB for `small`) into
    you plan to use — one is enough:
 
    ```toml
-   GEMINI_API_KEY = "AIza..."           # default provider
+   OPENROUTER_API_KEY = "sk-or-v1-..."  # default provider
+   GEMINI_API_KEY = "AIza..."
    ANTHROPIC_API_KEY = "sk-ant-..."
    OPENAI_API_KEY = "sk-..."
    XAI_API_KEY = "xai-..."
-   OPENROUTER_API_KEY = "sk-or-v1-..."
    APP_PASSWORD = "pick-something"      # optional shared-password gate
    ```
 
@@ -95,6 +103,9 @@ consequences:
 - **Uploads are capped at 400 MB** by `.streamlit/config.toml`. A 90-minute MP3
   at 128 kbps is about 85 MB, so this is usually fine; MP4 video is not.
   Extract the audio track first: `ffmpeg -i lecture.mp4 -vn -b:a 96k lecture.mp3`.
+  If a file is still too large, or a single transcription run is taking longer
+  than you want to sit through, split it and upload the parts — see
+  [Splitting a long recording](#splitting-a-long-recording).
 
 If any of that bites, run it on a campus machine or in Docker instead — the
 codebase is identical, and a GPU makes `large-v3` practical.
@@ -115,18 +126,73 @@ Prompts live in `src/prompts.py` and are meant to be edited for your discipline.
 
 | Provider | Key | Where to get one | Notes |
 |---|---|---|---|
-| **Google Gemini** *(default)* | `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Fast, cheap, free tier covers light use |
+| **OpenRouter** *(default)* | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key, any model — paste any slug from [openrouter.ai/models](https://openrouter.ai/models) |
+| Google Gemini | `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Free tier covers light use |
 | Anthropic Claude | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) | Best at following the item-writing rules |
 | OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | |
 | xAI Grok | `XAI_API_KEY` | [console.x.ai](https://console.x.ai) | OpenAI-compatible endpoint |
-| OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key, any model — paste any slug from [openrouter.ai/models](https://openrouter.ai/models) |
+
+The default model is **`deepseek/deepseek-v4-pro`** — strong enough to follow the
+item-writing rules in the prompts, and roughly a tenth the price of the frontier
+alternatives. `deepseek/deepseek-v4-flash` is cheaper again if you're generating
+across a whole semester; `deepseek/deepseek-r1` is available but its reasoning
+output makes it slower here for no gain on this task.
 
 Adding a provider is a single entry in `PROVIDERS` in `src/config.py`. Anything
 that speaks the OpenAI `/chat/completions` protocol needs only a `base_url`;
 Gemini and Claude have native paths because their SDKs give stronger JSON
 guarantees. OpenRouter deliberately skips native JSON mode — not every proxied
-model honors `response_format`, so JSON is requested in the prompt and salvaged
-from the reply instead.
+model honors `response_format`, and a rejected parameter fails the whole call, so
+JSON is requested in the prompt and salvaged from the reply instead.
+
+### Splitting a long recording
+
+Upload the parts together. They are ordered by filename with numbers read as
+numbers — so `part2` comes before `part10`, which plain alphabetical sorting gets
+wrong — and you can override that with **Use the order I uploaded them in**. The
+detected order is shown before you commit.
+
+Each part is transcribed in turn and its timestamps are shifted by the running
+total, so the combined transcript is one continuous lecture. A question drawn
+from part three is tagged `52:14` of the lecture, not `2:14` of the third file,
+and the summarizer's 10-minute windows straddle part boundaries exactly as they
+would in a single file.
+
+Two things to know:
+
+- **Split on a clean boundary, without overlap.** If parts overlap, the
+  overlapping speech is transcribed twice. The near-duplicate check will flag
+  questions that result, but trimming the overlap first is better.
+- **A part with no detectable speech is skipped, not fatal.** The rest still
+  processes and the app tells you which part was dropped — but the timeline after
+  that gap will be short by the missing part's length.
+
+To split a file with ffmpeg, in 25-minute pieces:
+
+```bash
+ffmpeg -i lecture.mp3 -f segment -segment_time 1500 -c copy lecture_part%d.mp3
+```
+
+### Alternative sets and replacing single questions
+
+On the **Questions** tab:
+
+- **✨ Generate an alternative set** writes a whole new set over the same
+  lecture. Every question you already have is passed in as an explicit
+  avoid-list, which matters more than it sounds: without it, a second pass
+  reproduces the first almost verbatim, because the salient points of a lecture
+  are the salient points however many times you ask. Previous sets are kept —
+  switch between them with the radio buttons, and export whichever you want.
+  Useful for a makeup exam, a practice bank that isn't the graded bank, or simply
+  a second opinion on a chunk you thought was under-covered.
+- **🔄 Replace this question** swaps one item for a newly written one. By default
+  the replacement is drawn from the same stretch of the lecture, so removing a
+  bad item doesn't quietly leave a hole in your coverage; toggle that off to draw
+  from anywhere. The point value is carried over, and the new item is validated
+  immediately.
+
+Both actions know about every question in every set, so replacements and
+alternative sets don't collide with each other.
 
 ---
 
@@ -157,24 +223,26 @@ lecture-quiz-builder/
 ├── src/
 │   ├── schema.py                 Transcript, Chunk, Summary, MCQ, Quiz
 │   ├── config.py                 settings, model catalogs, secret resolution
-│   ├── transcribe.py             faster-whisper wrapper
+│   ├── transcribe.py             faster-whisper wrapper, multi-part stitching
 │   ├── chunking.py               time-window splitting, question allocation
 │   ├── llm.py                    five-provider abstraction, retries, cost
 │   ├── prompts.py                every prompt, in one editable place
 │   ├── summarize.py              map-reduce summarization
-│   ├── mcq.py                    generation, validation, balancing, critique
+│   ├── mcq.py                    generation, validation, balancing, critique,
+│   │                             avoid-lists, single-question replacement
 │   └── exporters/
 │       ├── qti.py                QTI 1.2 (Canvas) and QTI 2.1
 │       ├── tabular.py            CSV, XLSX
 │       ├── documents.py          DOCX, PDF, Markdown
 │       └── transcript_formats.py TXT, SRT, WebVTT
 └── tests/
-    ├── test_pipeline.py          schema, validation, balancing, all exporters
-    └── test_llm_clients.py       provider wiring, against stubbed SDKs
+    ├── test_pipeline.py            schema, validation, balancing, all exporters
+    ├── test_llm_clients.py         provider wiring, against stubbed SDKs
+    └── test_multipart_and_regen.py part stitching, avoid-lists, replacement
 ```
 
 ```bash
-pytest -q          # 59 tests, no API keys or network needed
+pytest -q          # 81 tests, no API keys or network needed
 ```
 
 ---
@@ -204,18 +272,25 @@ Transcription is free (local compute). Generation, for a 60-minute lecture
 
 | Model | Approx. cost per lecture |
 |---|---|
-| `gemini-3.5-flash-lite` | ~$0.02 |
-| `gemini-3.8-flash` *(default)* | ~$0.04 |
+| `deepseek/deepseek-v4-flash` | ~$0.005 |
+| `deepseek/deepseek-v3.2` | ~$0.01 |
+| **`deepseek/deepseek-v4-pro`** *(default)* | ~$0.03 |
+| `gemini-3.8-flash` | ~$0.04 |
 | `grok-4.6` | ~$0.07 |
-| `claude-sonnet-4-5` | ~$0.10 |
 | `gpt-4.1` | ~$0.09 |
+| `claude-sonnet-4-5` | ~$0.10 |
 
 The sidebar shows actual token counts and an estimated cost after each run.
-OpenRouter shows tokens but no dollar figure — it prices per underlying model,
-so no static table would be honest; check your OpenRouter dashboard.
+OpenRouter figures are approximate — it routes to whichever upstream host is
+cheapest or fastest at the moment, so the real rate moves; check the OpenRouter
+dashboard for actual spend. Any model slug typed into the custom box shows tokens
+but no dollar figure, which is the honest answer rather than a fabricated one.
+
+An alternative set costs about the same as the original run. A single replacement
+costs one small call.
 
 Turning off the review pass roughly halves the cost and noticeably lowers
-question quality. On the default Gemini model this is not a trade worth making.
+question quality. At three cents a lecture that is not a trade worth making.
 
 ---
 

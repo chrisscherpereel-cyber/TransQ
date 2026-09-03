@@ -43,9 +43,25 @@ class Usage:
 
 
 # USD per million tokens (input, output). Update as list prices change; used
-# only for the on-screen estimate, never for billing. OpenRouter is absent on
-# purpose — it prices per underlying model, so no static table would be honest.
+# only for the on-screen estimate, never for billing.
+#
+# The OpenRouter entries are keyed by slug and are approximate: OpenRouter routes
+# to whichever upstream host is cheapest or fastest at the moment, so the real
+# rate moves. Treat those figures as an order of magnitude and check the
+# OpenRouter dashboard for the actual spend. Any slug not listed here (including
+# anything you type into the custom-model box) shows tokens but no dollar figure,
+# which is the honest answer rather than a fabricated one.
 PRICING: dict[str, tuple[float, float]] = {
+    # OpenRouter (approximate — see note above)
+    "deepseek/deepseek-v4-pro": (0.87, 1.74),
+    "deepseek/deepseek-v4-flash": (0.07, 0.17),
+    "deepseek/deepseek-v3.2": (0.21, 0.31),
+    "deepseek/deepseek-chat-v3.1": (0.25, 0.95),
+    "deepseek/deepseek-r1": (0.70, 2.50),
+    "google/gemini-3.8-flash": (0.75, 3.75),
+    "anthropic/claude-sonnet-4.5": (3.0, 15.0),
+    "openai/gpt-4.1": (2.0, 8.0),
+    "x-ai/grok-4.6": (2.0, 6.0),
     # Google
     "gemini-3.8-flash": (0.75, 3.75),
     "gemini-3.5-flash": (1.50, 9.00),

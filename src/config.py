@@ -71,6 +71,31 @@ class Provider:
 
 
 PROVIDERS: dict[str, Provider] = {
+    "openrouter": Provider(
+        key="openrouter",
+        label="OpenRouter",
+        sdk="openai",
+        env_var="OPENROUTER_API_KEY",
+        models=(
+            "deepseek/deepseek-v4-pro",
+            "deepseek/deepseek-v4-flash",
+            "deepseek/deepseek-v3.2",
+            "deepseek/deepseek-chat-v3.1",
+            "deepseek/deepseek-r1",
+            "google/gemini-3.8-flash",
+            "anthropic/claude-sonnet-4.5",
+            "openai/gpt-4.1",
+            "x-ai/grok-4.6",
+        ),
+        base_url="https://openrouter.ai/api/v1",
+        # OpenRouter proxies hundreds of models and not all of them honor
+        # response_format, so JSON is requested in the prompt and salvaged from
+        # the reply rather than enforced by the API.
+        supports_json_mode=False,
+        allow_custom_model=True,
+        console_url="https://openrouter.ai/keys",
+        note="Default. One key, any model — paste any slug from openrouter.ai/models.",
+    ),
     "gemini": Provider(
         key="gemini",
         label="Google Gemini",
@@ -84,7 +109,7 @@ PROVIDERS: dict[str, Provider] = {
             "gemini-2.5-flash",
         ),
         console_url="https://aistudio.google.com/apikey",
-        note="Default. Fast, inexpensive, and has a free tier that covers light use.",
+        note="Fast, inexpensive, and has a free tier that covers light use.",
     ),
     "anthropic": Provider(
         key="anthropic",
@@ -118,31 +143,9 @@ PROVIDERS: dict[str, Provider] = {
         console_url="https://console.x.ai",
         note="OpenAI-compatible endpoint at api.x.ai.",
     ),
-    "openrouter": Provider(
-        key="openrouter",
-        label="OpenRouter",
-        sdk="openai",
-        env_var="OPENROUTER_API_KEY",
-        models=(
-            "google/gemini-3.8-flash",
-            "anthropic/claude-sonnet-4.5",
-            "openai/gpt-4.1",
-            "x-ai/grok-4.6",
-            "meta-llama/llama-4-maverick",
-            "deepseek/deepseek-chat",
-        ),
-        base_url="https://openrouter.ai/api/v1",
-        # OpenRouter proxies hundreds of models and not all of them honor
-        # response_format, so JSON is requested in the prompt and salvaged from
-        # the reply rather than enforced by the API.
-        supports_json_mode=False,
-        allow_custom_model=True,
-        console_url="https://openrouter.ai/keys",
-        note="One key, any model. Paste any slug from openrouter.ai/models.",
-    ),
 }
 
-DEFAULT_PROVIDER = "gemini"
+DEFAULT_PROVIDER = "openrouter"
 
 # Back-compat for anything that imported the old flat mapping.
 LLM_MODELS: dict[str, list[str]] = {k: list(p.models) for k, p in PROVIDERS.items()}

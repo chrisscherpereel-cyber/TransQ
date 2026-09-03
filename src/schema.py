@@ -21,16 +21,40 @@ OPTION_LETTERS = ["A", "B", "C", "D", "E", "F"]
 
 
 class Segment(BaseModel):
-    """One Whisper segment, kept so every claim can be traced back to audio."""
+    """One Whisper segment, kept so every claim can be traced back to audio.
+
+    ``start``/``end`` are always on the *lecture* timeline. When a recording was
+    uploaded in parts, each part's times are offset by the running total before
+    its segments land here, so a timestamp on a question means the same thing
+    whether the lecture arrived as one file or five.
+    """
 
     index: int
     start: float
     end: float
     text: str
+    part: int = 0
 
     @property
     def timestamp(self) -> str:
         return format_timestamp(self.start)
+
+
+class TranscriptPart(BaseModel):
+    """Bookkeeping for one uploaded file within a multi-part recording."""
+
+    index: int
+    filename: str
+    offset: float  # where this part begins on the combined timeline
+    duration: float
+    segments: int = 0
+
+    @property
+    def label(self) -> str:
+        return (
+            f"{self.index + 1}. {self.filename} "
+            f"({format_timestamp(self.offset)}–{format_timestamp(self.offset + self.duration)})"
+        )
 
 
 class Transcript(BaseModel):
@@ -38,6 +62,12 @@ class Transcript(BaseModel):
     language: str = "en"
     duration: float = 0.0
     model_name: str = ""
+    parts: list[TranscriptPart] = Field(default_factory=list)
+    skipped_parts: list[str] = Field(default_factory=list)
+
+    @property
+    def is_multipart(self) -> bool:
+        return len(self.parts) > 1
 
     @property
     def text(self) -> str:

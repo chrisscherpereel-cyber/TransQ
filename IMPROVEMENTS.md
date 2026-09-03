@@ -66,6 +66,11 @@ under `.cache/transcripts/<sha256>.json`, and check it first. Re-generating
 questions with different settings then costs seconds instead of twenty minutes —
 which is what makes the tool usable iteratively rather than once.
 
+Worth doing **per part**, not per upload: re-uploading a four-part lecture with
+one part re-cut should re-transcribe one part, not four. The `TranscriptPart`
+records already carry the filename and offset needed to stitch cached parts back
+together.
+
 ---
 
 ## Tier 2 — meaningful features
@@ -86,11 +91,14 @@ operations course:
 The schema already carries `points` and per-option rationales; adding a `kind`
 discriminator to `MCQ` and branching in the exporters is the main work.
 
-### 6. Parallel forms
+### 6. Parallel forms at the item level
 
-Generate 3–5 variants of each item — same concept, different numbers, surface
-features, and answer position. Gives you makeup exams, a practice bank that
-isn't the graded bank, and meaningfully less exposure when answers circulate.
+Alternative *sets* already exist (the ✨ button on the Questions tab), which
+covers makeup exams and a separate practice bank. The finer-grained version is
+still open: 3–5 variants of the **same item** — same concept, different numbers
+and surface features — grouped so an LMS can draw one at random per student.
+That is what meaningfully reduces exposure when answers circulate, and in Canvas
+it maps onto question groups rather than a second quiz.
 
 ### 7. Close the loop with item analysis
 
@@ -184,8 +192,11 @@ the generator itself.
 | No transcript caching | Changing a generation setting re-transcribes from scratch (#4) |
 | Chunk overlap can duplicate content | Near-duplicate detection flags it, but does not merge |
 | Bloom self-labeling is unreliable | The model's "Analyze" is often Understand; treat labels as hints |
+| Overlapping upload parts are transcribed twice | Split on clean boundaries; the app assumes parts are contiguous and does not detect or trim overlap |
+| A skipped (silent) part shortens the timeline | Timestamps after the gap are off by that part's length; the app warns which part was dropped |
+| OpenRouter costs are approximate | It routes to whichever upstream host is cheapest at the moment; custom slugs show tokens only |
 | Gemini's free tier is rate-limited | A long lecture can trip requests-per-minute limits; the client retries with backoff, but a paid key is smoother |
-| OpenRouter cost is not estimated | It prices per underlying model — the sidebar shows tokens only |
 | Streamlit Cloud caps at `small` | Accented or noisy audio transcribes poorly there |
+| Alternative sets live only in the session | Closing the tab loses every set but the one you exported (Tier 2 #10 fixes this) |
 | Single-user session state | Two people using one deployment share nothing but also collide on nothing; there is no saved work |
 | QTI 1.2 tested against Canvas semantics only | Other LMSs accept the package but may map feedback fields differently |

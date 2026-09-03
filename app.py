@@ -47,16 +47,18 @@ from src.mcq import (
     coverage_report,
     critique_and_revise,
     generate_questions,
+    generate_replacement,
     validate_all,
 )
-from src.schema import OPTION_LETTERS, Quiz, QuizMeta, Summary, format_timestamp
+from src.schema import OPTION_LETTERS, Quiz, QuizMeta, Summary, Transcript, format_timestamp
 from src.summarize import summarize_transcript
 from src.transcribe import (
     TranscriptionError,
     estimate_transcription_minutes,
     load_model,
+    natural_sort_key,
     probe_duration,
-    transcribe_file,
+    transcribe_parts,
 )
 
 st.set_page_config(
@@ -83,6 +85,8 @@ def init_state() -> None:
         "transcript": None,
         "summary": None,
         "quiz": None,
+        "quiz_versions": [],
+        "active_version": 0,
         "chunks": [],
         "usage_cost": 0.0,
         "usage_tokens": 0,
@@ -216,7 +220,14 @@ def sidebar() -> AppSettings:
             c1, c2 = st.columns(2)
             c1.metric("Tokens used", f"{st.session_state.usage_tokens:,}")
             if st.session_state.usage_priced:
-                c2.metric("Est. API cost", f"${st.session_state.usage_cost:.4f}")
+                c2.metric(
+                    "Est. API cost",
+                    f"${st.session_state.usage_cost:.4f}",
+                    help="Approximate. OpenRouter routes to whichever upstream host is "
+                    "cheapest at the moment, so check its dashboard for actual spend."
+                    if s.provider == "openrouter"
+                    else "Based on list prices at the time of writing.",
+                )
             else:
                 c2.metric("Est. API cost", "—", help="No list price on file for this model.")
         st.caption(f"v{__version__} · faster-whisper runs locally; audio never leaves this server.")
@@ -228,52 +239,78 @@ def sidebar() -> AppSettings:
 # --------------------------------------------------------------------------- #
 
 
-def run_transcription(uploaded, settings: AppSettings) -> None:
-    suffix = os.path.splitext(uploaded.name)[1] or ".mp3"
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded.getbuffer())
-        audio_path = tmp.name
+def order_uploads(files: list, use_upload_order: bool) -> list:
+    """Put the parts of a split recording into lecture order."""
+    if use_upload_order:
+        return list(files)
+    return sorted(files, key=lambda f: natural_sort_key(f.name))
+
+
+def run_transcription(uploaded: list, settings: AppSettings) -> None:
+    """Transcribe one file, or several parts of a split recording, in order."""
+    paths: list[str] = []
+    names: list[str] = []
+
+    for item in uploaded:
+        suffix = os.path.splitext(item.name)[1] or ".mp3"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(item.getbuffer())
+            paths.append(tmp.name)
+            names.append(item.name)
 
     try:
-        duration = probe_duration(audio_path)
-        if duration:
-            est = estimate_transcription_minutes(duration, settings.whisper_model)
+        durations = [probe_duration(p) for p in paths]
+        total = sum(durations)
+        if total:
+            est = estimate_transcription_minutes(total, settings.whisper_model)
+            noun = "part" if len(paths) == 1 else "parts"
             st.info(
-                f"Audio length {format_timestamp(duration)} · "
+                f"{len(paths)} {noun} · combined length {format_timestamp(total)} · "
                 f"estimated transcription time ~{est:.1f} min on this server."
             )
 
         bar = st.progress(0.0, text="Loading the Whisper model…")
         model = get_whisper(settings.whisper_model, settings.compute_type)
 
-        def on_progress(frac: float, message: str) -> None:
-            bar.progress(min(1.0, frac), text=message)
-
-        transcript = transcribe_file(
+        transcript = transcribe_parts(
             model,
-            audio_path,
+            paths,
+            display_names=names,
             language=settings.language,
             vad_filter=settings.vad_filter,
             beam_size=settings.beam_size,
-            progress=on_progress,
+            progress=lambda f, m: bar.progress(min(1.0, f), text=m),
         )
         bar.empty()
 
         st.session_state.transcript = transcript
         st.session_state.summary = None
         st.session_state.quiz = None
-        st.session_state.source_filename = uploaded.name
-        st.success(
-            f"Transcribed {format_timestamp(transcript.duration)} of audio — "
-            f"{transcript.word_count:,} words, {len(transcript.segments)} segments."
+        st.session_state.quiz_versions = []
+        st.session_state.active_version = 0
+        st.session_state.source_filename = (
+            names[0] if len(names) == 1 else f"{os.path.splitext(names[0])[0]}_combined"
         )
+
+        st.success(
+            f"Transcribed {format_timestamp(transcript.duration)} of audio across "
+            f"{len(transcript.parts)} part(s) — {transcript.word_count:,} words, "
+            f"{len(transcript.segments)} segments."
+        )
+        if transcript.skipped_parts:
+            st.warning(
+                "Some parts were skipped and are missing from the transcript:\n\n"
+                + "\n".join(f"- {s}" for s in transcript.skipped_parts),
+                icon="⚠️",
+            )
     except TranscriptionError as exc:
         st.error(str(exc))
     finally:
-        try:
-            os.unlink(audio_path)
-        except OSError:
-            pass
+        for path in paths:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def build_client(settings: AppSettings) -> LLMClient | None:
@@ -287,6 +324,27 @@ def build_client(settings: AppSettings) -> LLMClient | None:
     except LLMError as exc:
         st.error(str(exc))
         return None
+
+
+def record_usage(client: LLMClient, settings: AppSettings) -> None:
+    st.session_state.usage_cost += estimate_cost(settings.llm_model, client.usage)
+    st.session_state.usage_tokens += client.usage.input_tokens + client.usage.output_tokens
+    st.session_state.usage_priced = has_pricing(settings.llm_model)
+
+
+def all_existing_stems() -> list[str]:
+    """Every stem the instructor has already seen, across all versions."""
+    stems: list[str] = []
+    for quiz in st.session_state.quiz_versions:
+        stems.extend(q.stem for q in quiz.questions)
+    return stems
+
+
+def store_version(quiz: Quiz) -> None:
+    quiz.meta.title = quiz.meta.title or "Lecture Quiz"
+    st.session_state.quiz_versions.append(quiz)
+    st.session_state.active_version = len(st.session_state.quiz_versions) - 1
+    st.session_state.quiz = quiz
 
 
 def run_generation(settings: AppSettings, do_review: bool) -> None:
@@ -329,25 +387,8 @@ def run_generation(settings: AppSettings, do_review: bool) -> None:
         questions = balance_answer_positions(questions)
         questions = validate_all(questions)
 
-        st.session_state.quiz = Quiz(
-            meta=QuizMeta(
-                title=summary.title or "Lecture Quiz",
-                course=settings.course_context.splitlines()[0][:80]
-                if settings.course_context
-                else "",
-                description=summary.abstract[:400],
-                source_filename=st.session_state.source_filename,
-                generated_on=dt.date.today().isoformat(),
-                model_used=f"{get_provider(settings.provider).label} {settings.llm_model} "
-                f"+ whisper-{settings.whisper_model}",
-            ),
-            questions=questions,
-        )
-        st.session_state.usage_cost = estimate_cost(settings.llm_model, client.usage)
-        st.session_state.usage_tokens = (
-            client.usage.input_tokens + client.usage.output_tokens
-        )
-        st.session_state.usage_priced = has_pricing(settings.llm_model)
+        store_version(build_quiz(questions, summary, settings, version=1))
+        record_usage(client, settings)
         bar.progress(1.0, text="Done")
         bar.empty()
 
@@ -360,13 +401,132 @@ def run_generation(settings: AppSettings, do_review: bool) -> None:
         st.error(str(exc))
 
 
+def build_quiz(questions, summary: Summary, settings: AppSettings, version: int) -> Quiz:
+    base = summary.title or "Lecture Quiz"
+    return Quiz(
+        meta=QuizMeta(
+            title=base if version == 1 else f"{base} — Set {version}",
+            course=settings.course_context.splitlines()[0][:80]
+            if settings.course_context
+            else "",
+            description=summary.abstract[:400],
+            source_filename=st.session_state.source_filename,
+            generated_on=dt.date.today().isoformat(),
+            model_used=f"{get_provider(settings.provider).label} {settings.llm_model} "
+            f"+ whisper-{settings.whisper_model}",
+        ),
+        questions=questions,
+    )
+
+
+def run_alternative_set(settings: AppSettings, do_review: bool) -> bool:
+    """Generate a fresh set of questions over the same lecture.
+
+    The existing questions are passed in as an explicit avoid-list. Without
+    that, a second run over the same transcript reproduces the first one almost
+    verbatim — the model keeps finding the same salient points, because they are
+    the same salient points.
+    """
+    chunks = st.session_state.chunks
+    summary = st.session_state.summary
+    client = build_client(settings)
+    if client is None or not chunks or summary is None:
+        st.error("Run the first generation pass before asking for an alternative set.")
+        return False
+
+    bar = st.progress(0.0, text="Writing an alternative set…")
+    try:
+        allocation = allocate_questions(settings.num_questions, len(chunks))
+        questions = generate_questions(
+            client,
+            chunks,
+            allocation,
+            n_options=settings.options_per_question,
+            bloom_targets=settings.bloom_targets,
+            difficulty_mix=settings.difficulty_mix,
+            course_context=settings.course_context,
+            avoid_stems=all_existing_stems(),
+            progress=lambda f, m: bar.progress(f * 0.8, text=m),
+        )
+        if do_review and questions:
+            questions, _ = critique_and_revise(
+                client, questions, progress=lambda f, m: bar.progress(0.8 + f * 0.15, text=m)
+            )
+        questions = validate_all(balance_answer_positions(questions))
+
+        bar.empty()
+        if not questions:
+            st.warning(
+                "The alternative pass produced nothing usable. "
+                "Try again, or raise the temperature in the sidebar."
+            )
+            return False
+
+        store_version(
+            build_quiz(
+                questions, summary, settings, version=len(st.session_state.quiz_versions) + 1
+            )
+        )
+        record_usage(client, settings)
+        # A toast rather than st.success: the caller reruns to show the new set,
+        # and a success box would be wiped by that rerun before it was read.
+        st.toast(
+            f"Added Set {len(st.session_state.quiz_versions)} — {len(questions)} new questions.",
+            icon="✨",
+        )
+        return True
+    except LLMError as exc:
+        bar.empty()
+        st.error(str(exc))
+        return False
+
+
+def run_replacement(settings: AppSettings, index: int, same_section: bool = True) -> None:
+    """Swap one question for a newly written one."""
+    quiz: Quiz | None = st.session_state.quiz
+    chunks = st.session_state.chunks
+    if quiz is None or not chunks:
+        return
+    client = build_client(settings)
+    if client is None:
+        return
+
+    old = quiz.questions[index]
+    try:
+        with st.spinner("Writing a replacement question…"):
+            new = generate_replacement(
+                client,
+                chunks,
+                old,
+                existing_stems=all_existing_stems(),
+                n_options=settings.options_per_question,
+                bloom_targets=settings.bloom_targets,
+                difficulty_mix=settings.difficulty_mix,
+                course_context=settings.course_context,
+                same_section=same_section,
+            )
+        record_usage(client, settings)
+    except LLMError as exc:
+        st.error(str(exc))
+        return
+
+    if new is None:
+        st.warning("Could not write a replacement for that question. Try again.")
+        return
+
+    quiz.questions[index] = new
+    validate_all(quiz.questions)
+    st.toast(f"Replaced question {index + 1}.", icon="🔄")
+    st.rerun()
+
+
 # --------------------------------------------------------------------------- #
 # Views
 # --------------------------------------------------------------------------- #
 
 
 def transcript_tab() -> None:
-    transcript = st.session_state.transcript
+    transcript: Transcript | None = st.session_state.transcript
     if transcript is None:
         st.info("Upload an audio file to get started.")
         return
@@ -375,7 +535,18 @@ def transcript_tab() -> None:
     c1.metric("Duration", format_timestamp(transcript.duration))
     c2.metric("Words", f"{transcript.word_count:,}")
     c3.metric("Segments", len(transcript.segments))
-    c4.metric("Language", transcript.language.upper())
+    c4.metric("Parts" if transcript.is_multipart else "Language",
+              len(transcript.parts) if transcript.is_multipart else transcript.language.upper())
+
+    if transcript.is_multipart:
+        with st.expander("Parts stitched into this transcript", expanded=False):
+            st.caption(
+                "Timestamps below are on the combined lecture timeline, so a question "
+                "tagged 0:52:14 points at the same moment whether the recording arrived "
+                "as one file or five."
+            )
+            for part in transcript.parts:
+                st.markdown(f"- {part.label} — {part.segments} segments")
 
     show_times = st.toggle("Show timestamps", value=True)
     text = transcript.text_with_timestamps() if show_times else transcript.text
@@ -436,11 +607,50 @@ def summary_tab() -> None:
     )
 
 
-def questions_tab() -> None:
+def version_bar(settings: AppSettings, review: bool) -> None:
+    """Switch between generated sets, or ask for another one."""
+    versions = st.session_state.quiz_versions
+    left, right = st.columns([3, 2])
+
+    with left:
+        if len(versions) > 1:
+            labels = [
+                f"Set {i + 1} ({len(v.included)} questions)" for i, v in enumerate(versions)
+            ]
+            picked = st.radio(
+                "Question set",
+                range(len(versions)),
+                index=st.session_state.active_version,
+                format_func=lambda i: labels[i],
+                horizontal=True,
+            )
+            if picked != st.session_state.active_version:
+                st.session_state.active_version = picked
+                st.session_state.quiz = versions[picked]
+                st.rerun()
+        else:
+            st.caption("One set generated so far.")
+
+    with right:
+        if st.button(
+            "✨ Generate an alternative set",
+            use_container_width=True,
+            help="Writes a whole new set over the same lecture, steered away from "
+            "every question you already have. The old set is kept — switch between "
+            "them on the left.",
+        ):
+            if run_alternative_set(settings, review):
+                st.rerun()
+
+
+def questions_tab(settings: AppSettings, review: bool) -> None:
     quiz: Quiz | None = st.session_state.quiz
     if quiz is None or not quiz.questions:
         st.info("Run **Summarize & generate questions** to build the question bank.")
         return
+
+    version_bar(settings, review)
+    st.divider()
 
     cov = coverage_report(quiz.included)
     flagged = sum(1 for q in quiz.questions if q.flags)
@@ -510,6 +720,23 @@ def questions_tab() -> None:
                 for flag in q.flags:
                     st.caption(f"⚠️ {flag}")
 
+            st.divider()
+            r1, r2 = st.columns([1, 2])
+            same_section = r2.toggle(
+                "Draw the replacement from the same part of the lecture",
+                value=True,
+                key=f"same_{q.id}",
+                help="On: the new question comes from the same stretch of the "
+                "recording, so coverage stays even. Off: anywhere in the lecture.",
+            )
+            if r1.button(
+                "🔄 Replace this question",
+                key=f"repl_{q.id}",
+                use_container_width=True,
+                disabled=not st.session_state.chunks,
+            ):
+                run_replacement(settings, i, same_section=same_section)
+
 
 def export_tab() -> None:
     quiz: Quiz | None = st.session_state.quiz
@@ -517,8 +744,18 @@ def export_tab() -> None:
         st.info("Generate and select at least one question to enable exports.")
         return
 
-    quiz.meta.title = st.text_input("Quiz title", quiz.meta.title)
-    quiz.meta.course = st.text_input("Course label (optional)", quiz.meta.course)
+    version = st.session_state.active_version
+    if len(st.session_state.quiz_versions) > 1:
+        st.caption(
+            f"Exporting **Set {version + 1}** of "
+            f"{len(st.session_state.quiz_versions)}. Switch sets on the Questions tab."
+        )
+    # Keys are version-scoped so switching sets does not carry the previous
+    # set's title into the box.
+    quiz.meta.title = st.text_input("Quiz title", quiz.meta.title, key=f"title_{version}")
+    quiz.meta.course = st.text_input(
+        "Course label (optional)", quiz.meta.course, key=f"course_{version}"
+    )
     stem = "".join(c if c.isalnum() or c in "-_" else "_" for c in quiz.meta.title)[:60] or "quiz"
     summary = st.session_state.summary
 
@@ -588,16 +825,32 @@ def main() -> None:
     )
 
     uploaded = st.file_uploader(
-        "Lecture audio or video",
+        "Lecture audio or video — one file, or several parts of a split recording",
         type=AUDIO_EXTENSIONS,
-        help="Up to ~400 MB. Longer recordings take proportionally longer to transcribe.",
+        accept_multiple_files=True,
+        help="Split a long lecture into parts if a single file is too big or too slow. "
+        "The parts are transcribed in order and stitched into one continuous transcript.",
     )
+
+    ordered: list = []
+    if uploaded:
+        use_upload_order = False
+        if len(uploaded) > 1:
+            use_upload_order = st.checkbox(
+                "Use the order I uploaded them in",
+                value=False,
+                help="Off: parts are ordered by filename, with numbers read as numbers "
+                "(so part2 comes before part10).",
+            )
+        ordered = order_uploads(uploaded, use_upload_order)
+        if len(ordered) > 1:
+            st.caption("**Transcription order:** " + " → ".join(f.name for f in ordered))
 
     a1, a2, _ = st.columns([1, 1, 2])
     if a1.button(
-        "1 · Transcribe", type="primary", disabled=uploaded is None, use_container_width=True
+        "1 · Transcribe", type="primary", disabled=not ordered, use_container_width=True
     ):
-        run_transcription(uploaded, settings)
+        run_transcription(ordered, settings)
 
     review = st.sidebar.checkbox(
         "Run a second-pass quality review",
@@ -619,7 +872,7 @@ def main() -> None:
     with t2:
         summary_tab()
     with t3:
-        questions_tab()
+        questions_tab(settings, review)
     with t4:
         export_tab()
 

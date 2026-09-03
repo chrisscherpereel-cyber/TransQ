@@ -115,11 +115,12 @@ def test_transcript_text_and_slice(transcript):
 # --------------------------------------------------------------------------- #
 
 
-def test_gemini_is_the_default_provider():
-    assert DEFAULT_PROVIDER == "gemini"
-    assert list(PROVIDERS)[0] == "gemini", "default should be first in the sidebar"
-    assert AppSettings().provider == "gemini"
-    assert AppSettings().llm_model in PROVIDERS["gemini"].models
+def test_openrouter_deepseek_is_the_default():
+    assert DEFAULT_PROVIDER == "openrouter"
+    assert list(PROVIDERS)[0] == "openrouter", "default should be first in the sidebar"
+    assert AppSettings().provider == "openrouter"
+    assert AppSettings().llm_model == "deepseek/deepseek-v4-pro"
+    assert AppSettings().llm_model in PROVIDERS["openrouter"].models
 
 
 def test_all_five_providers_are_registered():
@@ -171,20 +172,28 @@ def test_each_provider_reads_its_own_env_var(monkeypatch):
         assert AppSettings(provider=key).resolved_api_key() == f"key-for-{key}"
 
 
-def test_pricing_covers_every_listed_model_except_openrouter():
-    for key, spec in PROVIDERS.items():
+def test_every_curated_model_has_a_price():
+    for spec in PROVIDERS.values():
         for model in spec.models:
-            if key == "openrouter":
-                continue  # priced per underlying model upstream
             assert model in PRICING, f"{model} missing from PRICING"
 
 
 def test_cost_estimation_and_unpriced_models():
     usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
     assert estimate_cost("gemini-3.8-flash", usage) == pytest.approx(0.75 + 3.75)
+    assert estimate_cost("deepseek/deepseek-v4-pro", usage) == pytest.approx(0.87 + 1.74)
     assert has_pricing("grok-4.6")
-    assert not has_pricing("meta-llama/llama-4-maverick")
-    assert estimate_cost("meta-llama/llama-4-maverick", usage) == 0.0
+    # A slug typed into the custom-model box shows tokens but no dollar figure,
+    # rather than a fabricated one.
+    assert not has_pricing("some-vendor/unknown-model")
+    assert estimate_cost("some-vendor/unknown-model", usage) == 0.0
+
+
+def test_default_model_is_cheaper_than_the_frontier_alternatives():
+    """A regression guard on the default: it should stay in the cheap tier."""
+    default_in, default_out = PRICING["deepseek/deepseek-v4-pro"]
+    claude_in, claude_out = PRICING["claude-sonnet-4-5"]
+    assert default_in < claude_in and default_out < claude_out
 
 
 # --------------------------------------------------------------------------- #
