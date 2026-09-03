@@ -6,7 +6,8 @@ reviewable bank of multiple-choice questions you can import straight into Canvas
 
 Transcription runs **locally** with faster-whisper, so audio never leaves the
 server. Only the transcript text is sent to an LLM, and only for summarizing and
-question writing.
+question writing — Gemini by default, or Claude, OpenAI, Grok, or anything on
+OpenRouter.
 
 ```
 audio ──► faster-whisper ──► transcript ──► chunks ──► summary
@@ -24,7 +25,7 @@ audio ──► faster-whisper ──► transcript ──► chunks ──► s
 |---|---|
 | **Transcribe** | faster-whisper (CTranslate2), segment timestamps, voice-activity filtering, live progress |
 | **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms |
-| **Generate** | Questions written per chunk with Bloom-level and difficulty targets, each carrying the timestamp and a verbatim quote that supports the answer |
+| **Generate** | Questions written per chunk with Bloom-level and difficulty targets, each carrying the timestamp and a verbatim quote that supports the answer. Provider is a dropdown: Gemini, Claude, OpenAI, Grok, OpenRouter |
 | **Review** | An automatic second pass critiques the drafts and repairs or drops weak items |
 | **Validate** | Mechanical checks for "all of the above", duplicate options, giveaway answer length, negative stems, near-duplicate questions, missing provenance |
 | **Balance** | Correct answers are redistributed across A/B/C/D — LLMs have a strong positional bias students notice fast |
@@ -45,7 +46,7 @@ cd lecture-quiz-builder
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env        # add ANTHROPIC_API_KEY or OPENAI_API_KEY
+cp .env.example .env        # add GEMINI_API_KEY (or any other provider's key)
 streamlit run app.py
 ```
 
@@ -63,12 +64,16 @@ The first run downloads the Whisper weights (~150 MB for `small`) into
    or a private repo on a paid plan).
 2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app** → pick the
    repo, branch `main`, main file `app.py`.
-3. Open **Advanced settings → Secrets** and paste:
+3. Open **Advanced settings → Secrets** and paste keys for whichever providers
+   you plan to use — one is enough:
 
    ```toml
+   GEMINI_API_KEY = "AIza..."           # default provider
    ANTHROPIC_API_KEY = "sk-ant-..."
    OPENAI_API_KEY = "sk-..."
-   APP_PASSWORD = "pick-something"     # optional shared-password gate
+   XAI_API_KEY = "xai-..."
+   OPENROUTER_API_KEY = "sk-or-v1-..."
+   APP_PASSWORD = "pick-something"      # optional shared-password gate
    ```
 
 4. Deploy.
@@ -101,10 +106,27 @@ codebase is identical, and a GPU makes `large-v3` practical.
 Everything is in the sidebar; nothing needs a code change to try.
 
 **Transcription** — model size, language, voice-activity filter, beam size, compute type.
-**Generation** — provider (Claude / OpenAI), model, question count, options per question, Bloom levels, difficulty mix, temperature.
+**Generation** — provider, model, question count, options per question, Bloom levels, difficulty mix, temperature.
 **Context** — a free-text course description that steers what the model treats as important. This is worth filling in. "MGT 301 Operations Management, junior level; emphasize the trade-offs between chase and level strategies" produces materially better questions than the default.
 
 Prompts live in `src/prompts.py` and are meant to be edited for your discipline.
+
+### LLM providers
+
+| Provider | Key | Where to get one | Notes |
+|---|---|---|---|
+| **Google Gemini** *(default)* | `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Fast, cheap, free tier covers light use |
+| Anthropic Claude | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) | Best at following the item-writing rules |
+| OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | |
+| xAI Grok | `XAI_API_KEY` | [console.x.ai](https://console.x.ai) | OpenAI-compatible endpoint |
+| OpenRouter | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key, any model — paste any slug from [openrouter.ai/models](https://openrouter.ai/models) |
+
+Adding a provider is a single entry in `PROVIDERS` in `src/config.py`. Anything
+that speaks the OpenAI `/chat/completions` protocol needs only a `base_url`;
+Gemini and Claude have native paths because their SDKs give stronger JSON
+guarantees. OpenRouter deliberately skips native JSON mode — not every proxied
+model honors `response_format`, so JSON is requested in the prompt and salvaged
+from the reply instead.
 
 ---
 
@@ -137,7 +159,7 @@ lecture-quiz-builder/
 │   ├── config.py                 settings, model catalogs, secret resolution
 │   ├── transcribe.py             faster-whisper wrapper
 │   ├── chunking.py               time-window splitting, question allocation
-│   ├── llm.py                    Anthropic/OpenAI abstraction, retries, cost
+│   ├── llm.py                    five-provider abstraction, retries, cost
 │   ├── prompts.py                every prompt, in one editable place
 │   ├── summarize.py              map-reduce summarization
 │   ├── mcq.py                    generation, validation, balancing, critique
@@ -146,11 +168,13 @@ lecture-quiz-builder/
 │       ├── tabular.py            CSV, XLSX
 │       ├── documents.py          DOCX, PDF, Markdown
 │       └── transcript_formats.py TXT, SRT, WebVTT
-└── tests/test_pipeline.py        31 tests: schema, validation, all exporters
+└── tests/
+    ├── test_pipeline.py          schema, validation, balancing, all exporters
+    └── test_llm_clients.py       provider wiring, against stubbed SDKs
 ```
 
 ```bash
-pytest -q          # run the suite
+pytest -q          # 59 tests, no API keys or network needed
 ```
 
 ---
@@ -175,16 +199,23 @@ every generated item before it reaches a student.
 
 ## Costs
 
-Transcription is free (local compute). Generation runs roughly:
+Transcription is free (local compute). Generation, for a 60-minute lecture
+(~12k transcript tokens) with the review pass on:
 
-| Lecture length | Approx. transcript tokens | Cost with Claude Sonnet, review pass on |
-|---|---|---|
-| 30 min | ~6k | ~$0.05 |
-| 60 min | ~12k | ~$0.10 |
-| 90 min | ~18k | ~$0.15 |
+| Model | Approx. cost per lecture |
+|---|---|
+| `gemini-3.5-flash-lite` | ~$0.02 |
+| `gemini-3.8-flash` *(default)* | ~$0.04 |
+| `grok-4.6` | ~$0.07 |
+| `claude-sonnet-4-5` | ~$0.10 |
+| `gpt-4.1` | ~$0.09 |
 
-The sidebar shows the actual estimated cost after each run. Turning off the
-review pass roughly halves it and noticeably lowers question quality.
+The sidebar shows actual token counts and an estimated cost after each run.
+OpenRouter shows tokens but no dollar figure — it prices per underlying model,
+so no static table would be honest; check your OpenRouter dashboard.
+
+Turning off the review pass roughly halves the cost and noticeably lowers
+question quality. On the default Gemini model this is not a trade worth making.
 
 ---
 

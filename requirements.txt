@@ -6,7 +6,10 @@ pydantic>=2.7.0
 faster-whisper>=1.1.0
 av>=12.0.0
 
-# LLM providers (both optional at runtime; pick one in the sidebar)
+# LLM providers — all optional at runtime; pick one in the sidebar.
+# The openai package also serves xAI Grok and OpenRouter (same wire protocol,
+# different base_url), so three providers cost one dependency.
+google-genai>=1.0.0
 anthropic>=0.40.0
 openai>=1.55.0
 

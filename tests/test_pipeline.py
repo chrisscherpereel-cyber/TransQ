@@ -15,6 +15,7 @@ from collections import Counter
 import pytest
 
 from src.chunking import allocate_questions, chunk_transcript
+from src.config import DEFAULT_PROVIDER, PROVIDERS, AppSettings, get_provider
 from src.exporters import (
     export_csv,
     export_docx,
@@ -25,7 +26,7 @@ from src.exporters import (
     export_xlsx,
 )
 from src.exporters.transcript_formats import export_srt, export_vtt
-from src.llm import parse_json_object
+from src.llm import PRICING, Usage, estimate_cost, has_pricing, parse_json_object
 from src.mcq import (
     _coerce_mcq,
     balance_answer_positions,
@@ -107,6 +108,83 @@ def test_transcript_text_and_slice(transcript):
     assert transcript.word_count > 100
     assert "[0:00]" in transcript.text_with_timestamps()
     assert transcript.slice_by_time(0, 60).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Provider registry
+# --------------------------------------------------------------------------- #
+
+
+def test_gemini_is_the_default_provider():
+    assert DEFAULT_PROVIDER == "gemini"
+    assert list(PROVIDERS)[0] == "gemini", "default should be first in the sidebar"
+    assert AppSettings().provider == "gemini"
+    assert AppSettings().llm_model in PROVIDERS["gemini"].models
+
+
+def test_all_five_providers_are_registered():
+    assert set(PROVIDERS) == {"gemini", "anthropic", "openai", "xai", "openrouter"}
+
+
+def test_every_provider_is_completely_specified():
+    for key, spec in PROVIDERS.items():
+        assert spec.key == key
+        assert spec.sdk in {"gemini", "anthropic", "openai"}
+        assert spec.env_var.endswith("_API_KEY")
+        assert spec.models, f"{key} has no models"
+        assert spec.console_url.startswith("https://")
+
+
+def test_openai_compatible_providers_have_distinct_base_urls():
+    xai = PROVIDERS["xai"]
+    router = PROVIDERS["openrouter"]
+    assert xai.sdk == router.sdk == "openai"
+    assert xai.base_url == "https://api.x.ai/v1"
+    assert router.base_url == "https://openrouter.ai/api/v1"
+    assert PROVIDERS["openai"].base_url is None  # SDK default
+
+
+def test_openrouter_allows_custom_slugs_and_skips_native_json_mode():
+    router = PROVIDERS["openrouter"]
+    assert router.allow_custom_model is True
+    assert router.supports_json_mode is False
+    assert all("/" in m for m in router.models), "OpenRouter slugs are vendor/model"
+
+
+def test_get_provider_falls_back_to_the_default():
+    assert get_provider("nonsense").key == DEFAULT_PROVIDER
+    assert get_provider("xai").label == "xAI Grok"
+
+
+def test_api_key_resolution_prefers_explicit_key(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "from-env")
+    assert AppSettings(provider="gemini").resolved_api_key() == "from-env"
+    assert AppSettings(provider="gemini", api_key="typed").resolved_api_key() == "typed"
+    monkeypatch.delenv("GEMINI_API_KEY")
+    assert AppSettings(provider="gemini").resolved_api_key() == ""
+
+
+def test_each_provider_reads_its_own_env_var(monkeypatch):
+    for key, spec in PROVIDERS.items():
+        monkeypatch.setenv(spec.env_var, f"key-for-{key}")
+    for key, spec in PROVIDERS.items():
+        assert AppSettings(provider=key).resolved_api_key() == f"key-for-{key}"
+
+
+def test_pricing_covers_every_listed_model_except_openrouter():
+    for key, spec in PROVIDERS.items():
+        for model in spec.models:
+            if key == "openrouter":
+                continue  # priced per underlying model upstream
+            assert model in PRICING, f"{model} missing from PRICING"
+
+
+def test_cost_estimation_and_unpriced_models():
+    usage = Usage(input_tokens=1_000_000, output_tokens=1_000_000)
+    assert estimate_cost("gemini-3.8-flash", usage) == pytest.approx(0.75 + 3.75)
+    assert has_pricing("grok-4.6")
+    assert not has_pricing("meta-llama/llama-4-maverick")
+    assert estimate_cost("meta-llama/llama-4-maverick", usage) == 0.0
 
 
 # --------------------------------------------------------------------------- #

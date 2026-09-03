@@ -1,4 +1,4 @@
-"""Runtime settings and secret resolution.
+"""Runtime settings, the provider registry, and secret resolution.
 
 Secrets are looked up in this order: Streamlit secrets -> environment ->
 whatever the user typed into the sidebar. That lets the same code run on
@@ -34,20 +34,124 @@ WHISPER_MODELS: dict[str, str] = {
     "large-v3": "Best accuracy. GPU strongly recommended.",
 }
 
-LLM_MODELS: dict[str, list[str]] = {
-    "anthropic": [
-        "claude-sonnet-4-5",
-        "claude-opus-4-1",
-        "claude-haiku-4-5",
-    ],
-    "openai": [
-        "gpt-4.1",
-        "gpt-4.1-mini",
-        "gpt-4o",
-    ],
+
+# --------------------------------------------------------------------------- #
+# LLM providers
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class Provider:
+    """Everything the app needs to know to talk to one LLM vendor.
+
+    ``sdk`` picks the code path in ``src.llm``:
+
+    * ``"gemini"``     — the native ``google-genai`` SDK
+    * ``"anthropic"``  — the native ``anthropic`` SDK
+    * ``"openai"``     — the ``openai`` SDK, pointed at ``base_url``
+
+    Three vendors share the ``openai`` path because OpenAI, xAI, and OpenRouter
+    all expose the same ``/chat/completions`` contract. Gemini also offers an
+    OpenAI-compatible endpoint, but it is still marked beta and its handling of
+    ``response_format`` is inconsistent — since this app depends on reliable JSON,
+    Gemini uses its native SDK, where ``response_mime_type`` is a first-class
+    guarantee.
+    """
+
+    key: str
+    label: str
+    sdk: str
+    env_var: str
+    models: tuple[str, ...]
+    base_url: str | None = None
+    supports_json_mode: bool = True
+    allow_custom_model: bool = False
+    console_url: str = ""
+    note: str = ""
+
+
+PROVIDERS: dict[str, Provider] = {
+    "gemini": Provider(
+        key="gemini",
+        label="Google Gemini",
+        sdk="gemini",
+        env_var="GEMINI_API_KEY",
+        models=(
+            "gemini-3.8-flash",
+            "gemini-3.5-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ),
+        console_url="https://aistudio.google.com/apikey",
+        note="Default. Fast, inexpensive, and has a free tier that covers light use.",
+    ),
+    "anthropic": Provider(
+        key="anthropic",
+        label="Anthropic Claude",
+        sdk="anthropic",
+        env_var="ANTHROPIC_API_KEY",
+        models=(
+            "claude-sonnet-4-5",
+            "claude-opus-4-1",
+            "claude-haiku-4-5",
+        ),
+        console_url="https://console.anthropic.com/settings/keys",
+        note="Strongest at following the item-writing rules in the prompts.",
+    ),
+    "openai": Provider(
+        key="openai",
+        label="OpenAI",
+        sdk="openai",
+        env_var="OPENAI_API_KEY",
+        models=("gpt-4.1", "gpt-4.1-mini", "gpt-4o"),
+        base_url=None,  # SDK default
+        console_url="https://platform.openai.com/api-keys",
+    ),
+    "xai": Provider(
+        key="xai",
+        label="xAI Grok",
+        sdk="openai",
+        env_var="XAI_API_KEY",
+        models=("grok-4.6", "grok-4"),
+        base_url="https://api.x.ai/v1",
+        console_url="https://console.x.ai",
+        note="OpenAI-compatible endpoint at api.x.ai.",
+    ),
+    "openrouter": Provider(
+        key="openrouter",
+        label="OpenRouter",
+        sdk="openai",
+        env_var="OPENROUTER_API_KEY",
+        models=(
+            "google/gemini-3.8-flash",
+            "anthropic/claude-sonnet-4.5",
+            "openai/gpt-4.1",
+            "x-ai/grok-4.6",
+            "meta-llama/llama-4-maverick",
+            "deepseek/deepseek-chat",
+        ),
+        base_url="https://openrouter.ai/api/v1",
+        # OpenRouter proxies hundreds of models and not all of them honor
+        # response_format, so JSON is requested in the prompt and salvaged from
+        # the reply rather than enforced by the API.
+        supports_json_mode=False,
+        allow_custom_model=True,
+        console_url="https://openrouter.ai/keys",
+        note="One key, any model. Paste any slug from openrouter.ai/models.",
+    ),
 }
 
+DEFAULT_PROVIDER = "gemini"
+
+# Back-compat for anything that imported the old flat mapping.
+LLM_MODELS: dict[str, list[str]] = {k: list(p.models) for k, p in PROVIDERS.items()}
+
 AUDIO_EXTENSIONS = ["mp3", "wav", "m4a", "mp4", "mpeg", "mpga", "webm", "ogg", "flac", "aac"]
+
+
+def get_provider(key: str) -> Provider:
+    return PROVIDERS.get(key, PROVIDERS[DEFAULT_PROVIDER])
 
 
 def get_secret(name: str, default: str = "") -> str:
@@ -61,6 +165,11 @@ def get_secret(name: str, default: str = "") -> str:
     return os.environ.get(name, default)
 
 
+def available_providers() -> list[str]:
+    """Provider keys that already have a key configured, default first."""
+    return [k for k, p in PROVIDERS.items() if get_secret(p.env_var)]
+
+
 @dataclass
 class AppSettings:
     # Transcription
@@ -71,8 +180,8 @@ class AppSettings:
     beam_size: int = 1
 
     # Generation
-    provider: str = "anthropic"
-    llm_model: str = "claude-sonnet-4-5"
+    provider: str = DEFAULT_PROVIDER
+    llm_model: str = PROVIDERS[DEFAULT_PROVIDER].models[0]
     api_key: str = ""
     temperature: float = 0.3
 
@@ -92,5 +201,4 @@ class AppSettings:
     def resolved_api_key(self) -> str:
         if self.api_key:
             return self.api_key
-        env_name = "ANTHROPIC_API_KEY" if self.provider == "anthropic" else "OPENAI_API_KEY"
-        return get_secret(env_name)
+        return get_secret(get_provider(self.provider).env_var)

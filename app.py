@@ -17,7 +17,15 @@ import streamlit as st
 
 from src import __version__
 from src.chunking import allocate_questions
-from src.config import AUDIO_EXTENSIONS, LLM_MODELS, WHISPER_MODELS, AppSettings, get_secret
+from src.config import (
+    AUDIO_EXTENSIONS,
+    DEFAULT_PROVIDER,
+    PROVIDERS,
+    WHISPER_MODELS,
+    AppSettings,
+    get_provider,
+    get_secret,
+)
 from src.exporters import (
     export_csv,
     export_docx,
@@ -33,7 +41,7 @@ from src.exporters.transcript_formats import (
     export_txt,
     export_vtt,
 )
-from src.llm import LLMClient, LLMError, estimate_cost
+from src.llm import LLMClient, LLMError, estimate_cost, has_pricing
 from src.mcq import (
     balance_answer_positions,
     coverage_report,
@@ -77,6 +85,8 @@ def init_state() -> None:
         "quiz": None,
         "chunks": [],
         "usage_cost": 0.0,
+        "usage_tokens": 0,
+        "usage_priced": True,
         "source_filename": "",
         "authenticated": False,
     }
@@ -140,21 +150,40 @@ def sidebar() -> AppSettings:
             s.beam_size = st.slider("Beam size", 1, 5, 1, help="Higher is slower and slightly more accurate.")
 
         with st.expander("Question generation", expanded=True):
-            s.provider = st.radio(
-                "LLM provider", ["anthropic", "openai"], horizontal=True,
-                format_func=lambda p: "Claude" if p == "anthropic" else "OpenAI",
+            provider_keys = list(PROVIDERS)
+            s.provider = st.selectbox(
+                "LLM provider",
+                provider_keys,
+                index=provider_keys.index(DEFAULT_PROVIDER),
+                format_func=lambda k: PROVIDERS[k].label,
             )
-            s.llm_model = st.selectbox("Model", LLM_MODELS[s.provider])
+            spec = get_provider(s.provider)
+            if spec.note:
+                st.caption(spec.note)
 
-            key_env = "ANTHROPIC_API_KEY" if s.provider == "anthropic" else "OPENAI_API_KEY"
-            if get_secret(key_env):
-                st.success(f"{key_env} found in secrets", icon="✅")
+            models = list(spec.models)
+            if spec.allow_custom_model:
+                models.append("Other (type a model slug)…")
+            s.llm_model = st.selectbox("Model", models, key=f"model_{s.provider}")
+            if s.llm_model.startswith("Other ("):
+                s.llm_model = st.text_input(
+                    "Model slug",
+                    value=spec.models[0],
+                    help="Any slug from openrouter.ai/models, e.g. "
+                    "`mistralai/mistral-large` or `qwen/qwen3-max`.",
+                ).strip()
+
+            if get_secret(spec.env_var):
+                st.success(f"{spec.env_var} found in secrets", icon="✅")
             else:
                 s.api_key = st.text_input(
-                    f"{key_env}", type="password",
+                    spec.env_var,
+                    type="password",
                     help="Stored only for this browser session. For a shared deployment, "
                     "put it in Streamlit secrets instead.",
                 )
+                if spec.console_url:
+                    st.caption(f"[Get a {spec.label} key]({spec.console_url})")
 
             s.num_questions = st.slider("Number of questions", 3, 40, 10)
             s.options_per_question = st.select_slider("Options per question", [3, 4, 5], value=4)
@@ -183,8 +212,13 @@ def sidebar() -> AppSettings:
             )
 
         st.divider()
-        if st.session_state.usage_cost:
-            st.metric("Estimated API cost", f"${st.session_state.usage_cost:.4f}")
+        if st.session_state.usage_tokens:
+            c1, c2 = st.columns(2)
+            c1.metric("Tokens used", f"{st.session_state.usage_tokens:,}")
+            if st.session_state.usage_priced:
+                c2.metric("Est. API cost", f"${st.session_state.usage_cost:.4f}")
+            else:
+                c2.metric("Est. API cost", "—", help="No list price on file for this model.")
         st.caption(f"v{__version__} · faster-whisper runs locally; audio never leaves this server.")
     return s
 
@@ -304,11 +338,16 @@ def run_generation(settings: AppSettings, do_review: bool) -> None:
                 description=summary.abstract[:400],
                 source_filename=st.session_state.source_filename,
                 generated_on=dt.date.today().isoformat(),
-                model_used=f"{settings.llm_model} + whisper-{settings.whisper_model}",
+                model_used=f"{get_provider(settings.provider).label} {settings.llm_model} "
+                f"+ whisper-{settings.whisper_model}",
             ),
             questions=questions,
         )
         st.session_state.usage_cost = estimate_cost(settings.llm_model, client.usage)
+        st.session_state.usage_tokens = (
+            client.usage.input_tokens + client.usage.output_tokens
+        )
+        st.session_state.usage_priced = has_pricing(settings.llm_model)
         bar.progress(1.0, text="Done")
         bar.empty()
 

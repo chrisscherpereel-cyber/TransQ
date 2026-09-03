@@ -184,6 +184,8 @@ the generator itself.
 | No transcript caching | Changing a generation setting re-transcribes from scratch (#4) |
 | Chunk overlap can duplicate content | Near-duplicate detection flags it, but does not merge |
 | Bloom self-labeling is unreliable | The model's "Analyze" is often Understand; treat labels as hints |
+| Gemini's free tier is rate-limited | A long lecture can trip requests-per-minute limits; the client retries with backoff, but a paid key is smoother |
+| OpenRouter cost is not estimated | It prices per underlying model — the sidebar shows tokens only |
 | Streamlit Cloud caps at `small` | Accented or noisy audio transcribes poorly there |
 | Single-user session state | Two people using one deployment share nothing but also collide on nothing; there is no saved work |
 | QTI 1.2 tested against Canvas semantics only | Other LMSs accept the package but may map feedback fields differently |
