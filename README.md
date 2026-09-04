@@ -11,7 +11,8 @@ OpenAI, Grok, or any other model OpenRouter carries.
 
 Long recordings can be uploaded **in parts**: split a 90-minute lecture into
 three files and they are transcribed in order, then stitched into one continuous
-transcript before anything else happens.
+transcript before anything else happens. Already have captions from Panopto,
+Zoom or YouTube? **Import them** and skip transcription entirely.
 
 ```
 part 1 ─┐
@@ -39,6 +40,9 @@ part 3 ─┘    (sequential)       (one timeline)         │
 | **Edit** | Every stem, option, and answer key is editable in the browser before export |
 | **Regenerate** | Ask for a whole alternative set (kept side by side with the first), or replace any single question with a newly written one |
 | **Export** | QTI 1.2 (Canvas) · QTI 2.1 · XLSX · CSV · DOCX · PDF · Markdown · SRT/VTT captions |
+| **Accounts** | Sign-in with lockout and idle timeout, admin-created users, per-account settings, and personal API keys encrypted so only that user can read them |
+| **Issued keys** | Mint a capped, revocable OpenRouter key per person — no collecting personal credentials |
+| **Track** | Tokens and estimated cost, live during a run and cumulative per account |
 
 Every generated question is a **draft for your review**, not a finished exam item.
 The app is built to make review fast, not to make it unnecessary.
@@ -54,7 +58,7 @@ cd lecture-quiz-builder
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env        # add OPENROUTER_API_KEY (or any other provider's key)
+cp .env.example .env        # set APP_SECRET (required); an API key is optional
 streamlit run app.py
 ```
 
@@ -72,19 +76,24 @@ The first run downloads the Whisper weights (~150 MB for `small`) into
    or a private repo on a paid plan).
 2. Go to [share.streamlit.io](https://share.streamlit.io) → **New app** → pick the
    repo, branch `main`, main file `app.py`.
-3. Open **Advanced settings → Secrets** and paste keys for whichever providers
-   you plan to use — one is enough:
+3. Open **Advanced settings → Secrets**:
 
    ```toml
+   # Required — everything persisted is encrypted with a key derived from this.
+   APP_SECRET = "a-long-random-string"
+
+   # Strongly recommended on Streamlit Cloud: the container disk is wiped on
+   # every restart, so without Dropbox your accounts will not survive one.
+   DROPBOX_APP_KEY = "..."
+   DROPBOX_APP_SECRET = "..."
+   DROPBOX_REFRESH_TOKEN = "..."
+
+   # Optional shared fallback keys — each user can save their own instead.
    OPENROUTER_API_KEY = "sk-or-v1-..."  # default provider
-   GEMINI_API_KEY = "AIza..."
-   ANTHROPIC_API_KEY = "sk-ant-..."
-   OPENAI_API_KEY = "sk-..."
-   XAI_API_KEY = "xai-..."
-   APP_PASSWORD = "pick-something"      # optional shared-password gate
    ```
 
-4. Deploy.
+4. Deploy, then open the app: it will ask you to create the administrator
+   account. See [Accounts and persistence](#accounts-and-persistence).
 
 `requirements.txt` and `packages.txt` (which installs `ffmpeg`) are picked up
 automatically.
@@ -203,6 +212,38 @@ To split a file with ffmpeg, in 25-minute pieces:
 ffmpeg -i lecture.mp3 -f segment -segment_time 1500 -c copy lecture_part%d.mp3
 ```
 
+### Importing a transcript instead of audio
+
+Pick **📄 An existing transcript** and upload one of:
+
+| Format | Timestamps |
+|---|---|
+| `.srt`, `.vtt` | Real — the best input; every question keeps a true position in the recording |
+| Timestamped text (`[12:34] …`) | Real |
+| `.txt`, `.md` | **Estimated** from a 150 wpm speaking rate |
+
+Untimed text still works: everything downstream needs *a* timeline, so one is
+estimated and the app labels it as such. Treat a question's timestamp as
+approximate rather than a place to scrub to.
+
+This path is often better than transcribing. A human-corrected department
+transcript beats what `small` Whisper produces on a CPU, and it arrives in
+seconds rather than twenty minutes.
+
+### Getting the number of questions you asked for
+
+Ask for 12 and you get 12. That takes more than one prompt, because three things
+independently eat into the count: a model asked for three questions from a
+section often returns two; malformed items are dropped during parsing; and the
+review pass then *rejects* weak drafts.
+
+So the count is enforced rather than hoped for. After the first pass the app
+counts what survived and runs further rounds for the shortfall — including after
+the review pass, so a rejected item is replaced instead of simply lost. Surplus
+items stay in the bank unchecked (tick any to include it), rejected drafts stay
+visible with the reviewer's reason, and if the lecture genuinely cannot support
+the request, the app says so instead of quietly handing back fewer.
+
 ### Alternative sets and replacing single questions
 
 On the **Questions** tab:
@@ -239,6 +280,163 @@ handles the 1.2 package more reliably.
 
 ---
 
+## Accounts and persistence
+
+### First run
+
+Set `APP_SECRET` (see below), start the app, and it asks you to create the
+administrator account. From then on, **only an administrator creates accounts** —
+there is no self-registration, which is the right default for a public URL.
+
+New users get a temporary password and are made to choose their own at first
+sign-in. Admins can change roles, disable accounts, reset passwords, and delete
+users from the **🛠️ Admin** tab. The last remaining administrator cannot be
+deleted, demoted, or disabled — locking yourself out of your own deployment is an
+easy mistake and an annoying one to undo.
+
+### What persists per account
+
+- The provider and model you last used, plus question count, options, Bloom
+  levels, difficulty and course context — press **💾 Save these settings to my
+  account** and the next sign-in starts where you left off.
+- **An API key**, encrypted — either one you saved yourself, or one an
+  administrator issued to you (below). Each account holds its own, so a
+  colleague's usage bills their account and nobody can spend your budget.
+  A key you save yourself is encrypted with a key derived from **your password**,
+  so nobody else — including an administrator — can read it back. The
+  consequence: if an administrator resets your password, your saved keys are
+  gone and you re-enter them. That is the guarantee working, not a bug.
+- Your usage history.
+
+### Security features
+
+- **Sign-in throttling** — 5 failed attempts locks an account for 15 minutes.
+- **Idle timeout** — sessions end after 8 hours, discarding the key that reads
+  your saved credentials.
+- **Security log** — sign-ins, lockouts, account changes and key events, visible
+  to admins and exportable. Credentials themselves are never logged.
+- **My security panel** — change your password (saved keys survive), or forget
+  every personal key at once.
+- **Key rotation** — `python scripts/rotate_key.py --new-secret …` re-encrypts
+  the whole store, so `APP_SECRET` can actually be changed after an exposure.
+
+[SECURITY.md](SECURITY.md) explains the design, what it deliberately costs, and
+what remains true anyway.
+
+### Issued keys — the safer way to give colleagues access
+
+Instead of asking people for their personal API key, issue each of them a
+**capped, revocable OpenRouter key** from the Admin tab. This is the recommended
+setup for any deployment other people sign in to.
+
+1. Create a **management key** at
+   [openrouter.ai/settings/management-keys](https://openrouter.ai/settings/management-keys).
+   It is a different kind of key from an inference key — an ordinary `sk-or-v1-…`
+   used for chat will not work here, and the app says so if you paste one.
+2. **Admin → Issued API keys** → paste it. The app verifies it against OpenRouter
+   before saving, then stores it encrypted.
+3. Set a default cap (e.g. `$5.00`) and a reset period (monthly, weekly, daily).
+4. Open any account and press **🔑 Issue an OpenRouter key**.
+
+That user now has a working key on their account without pasting anything. From
+the same panel you can watch spend against the cap, raise or lower it, pause the
+key, or revoke it outright — and deleting an account revokes its key first, so a
+departed colleague never leaves a live credential behind.
+
+Why this is better than storing personal keys:
+
+| | Personal key saved in the app | Issued key |
+|---|---|---|
+| A leak costs | Their entire OpenRouter balance | At most that key's cap |
+| Revoking it | Their problem, on their account | One click, here |
+| Who is the custodian | You, of their credential | Nobody — the key is yours to begin with |
+| Per-user spend | This app's estimate | OpenRouter's own accounting |
+
+At roughly three cents a lecture, a `$5.00` monthly cap is about 150 lectures —
+generous for a colleague and survivable as a mistake.
+
+The management key is the one credential that still matters: it can mint and
+revoke keys on your account. It is stored encrypted under `APP_SECRET`, and
+[SECURITY.md](SECURITY.md) covers what that does and does not protect against.
+
+### Setting `APP_SECRET`
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Put it in `.streamlit/secrets.toml` (or `.env` locally). Everything stored is
+encrypted with a key derived from it: accounts, settings, API keys and the usage
+ledger are opaque blobs on disk or in Dropbox.
+
+**Back `APP_SECRET` up where you back up passwords.** To change it, use
+`scripts/rotate_key.py` *while you still have the current one* — that re-encrypts
+everything under the new secret. Losing it outright is still unrecoverable.
+
+Without `APP_SECRET` the app still runs, but nothing is saved and it says so.
+
+### Storage backends
+
+| | When to use it | Survives a Streamlit Cloud restart? |
+|---|---|---|
+| **Encrypted local files** (default) | A machine you control, or local development | ❌ — the container disk is wiped |
+| **Dropbox app folder** | A shared deployment on Streamlit Cloud | ✅ |
+
+Dropbox wins automatically when its credentials are present. To get them:
+
+1. [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps) →
+   **Create app** → Scoped access → **App folder** → name it.
+2. Under **Permissions**, tick `files.content.read` and `files.content.write`,
+   then **Submit**.
+3. Visit, with your app key substituted in:
+   `https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline`
+   Approve, and copy the authorization code.
+4. Exchange it for a refresh token:
+
+   ```bash
+   curl -u APP_KEY:APP_SECRET https://api.dropboxapi.com/oauth2/token \
+     -d code=THE_CODE -d grant_type=authorization_code
+   ```
+
+5. Put `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET` and the `refresh_token` from that
+   response into your secrets.
+
+**An honest note on Dropbox.** It is file storage, not a database — no
+transactions, no row locking. Two people saving at the same instant means one
+write lands on top of the other. The backend uses revision-checked writes so a
+collision is detected and retried rather than silently swallowed, which is enough
+for a handful of instructors sharing a deployment. For a whole department, use a
+real database: `Store` in `src/storage.py` is a deliberately small three-method
+interface, so a Postgres or Supabase backend is one class, not a rewrite.
+
+### Before you share the URL
+
+Storing other people's API keys on a free public host is a real decision, not a
+formality. Encrypted at rest is not the same as safe: anyone who can read your
+Streamlit secrets can decrypt everything. If that matters, run it on a campus
+machine, or have each user paste their key per session rather than saving it.
+
+**[SECURITY.md](SECURITY.md)** works through this properly — what the current
+design protects against, what it does not, and the changes worth making before
+colleagues sign in. The short version: issue capped, revocable per-user keys
+through OpenRouter's provisioning API rather than protecting unlimited ones, and
+key the encryption on each user's password so the server cannot decrypt without
+them.
+
+## Usage and cost tracking
+
+The sidebar shows tokens and estimated cost climbing **during** a run — the LLM
+client reports after every call, so you see the meter move rather than learning
+the cost afterwards.
+
+The **📊 Usage** tab keeps the history: totals, estimated cost per day, per model,
+and per pipeline step, with every run in a table you can export as CSV.
+Administrators can switch the scope to **Everyone** and see spend per user.
+
+Costs are estimates from published rates. Your provider's dashboard is the
+authority on what you were actually billed — this is here so nothing is a
+surprise before you get there.
+
 ## Project layout
 
 ```
@@ -257,6 +455,14 @@ lecture-quiz-builder/
 │   ├── chunking.py               time-window splitting, question allocation
 │   ├── llm.py                    five-provider abstraction, retries, cost
 │   ├── openrouter_catalog.py     live model list: fetch, filter, sort, free flags
+│   ├── storage.py                encrypted Store: local files and Dropbox
+│   ├── accounts.py               users, roles, scrypt passwords, saved keys
+│   ├── usage.py                  live meter and the persistent usage ledger
+│   ├── provisioning.py           issue/cap/revoke per-user OpenRouter keys
+│   ├── appconfig.py              encrypted deployment settings
+│   ├── keymgmt.py                key derivation, purpose subkeys, rotation
+│   ├── audit.py                  security log (never records credentials)
+│   ├── transcript_import.py      SRT / VTT / timestamped / plain-text import
 │   ├── prompts.py                every prompt, in one editable place
 │   ├── summarize.py              map-reduce summarization
 │   ├── mcq.py                    generation, validation, balancing, critique,
@@ -270,11 +476,17 @@ lecture-quiz-builder/
     ├── test_pipeline.py             schema, validation, balancing, all exporters
     ├── test_llm_clients.py          provider wiring, against stubbed SDKs
     ├── test_multipart_and_regen.py  part stitching, avoid-lists, replacement
-    └── test_openrouter_catalog.py   catalog parsing, filters, free detection
+    ├── test_openrouter_catalog.py   catalog parsing, filters, free detection
+    ├── test_import_and_counts.py    transcript import, question-count guarantee
+    ├── test_accounts_storage_usage.py  crypto, accounts, roles, usage ledger
+    ├── test_provisioning.py         issued keys: mint, cap, inspect, revoke
+    └── test_security_hardening.py   crypto, envelope encryption, lockout, audit
 ```
 
+`scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
+
 ```bash
-pytest -q          # 103 tests, no API keys or network needed
+pytest -q          # 247 tests, no API keys or network needed
 ```
 
 ---

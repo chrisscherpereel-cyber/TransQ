@@ -148,12 +148,29 @@ Point it at a folder or a Panopto/Kaltura/Zoom export and process a whole
 semester overnight. Most of the marginal value of this tool shows up when it runs
 over fourteen lectures, not one.
 
-### 13. Real authentication
+### 12b. Key protection — done; see SECURITY.md
 
-The shared password is fine for one instructor. For a department, use OIDC
-against campus SSO and give each user their own key and usage quota. Add a
-per-session token ceiling regardless — an accidental 40-question run on a
-three-hour recording should not be able to surprise anyone.
+Persistence and API-key handling have their own document,
+[SECURITY.md](SECURITY.md). All five recommendations there are now implemented:
+capped revocable issued keys, envelope encryption keyed on each user's password,
+purpose-separated subkeys with a working rotation script, per-user documents with
+rollback detection, and the operational set (lockout, idle timeout, audit log,
+self-service revocation, key masking).
+
+What remains there is conditional rather than outstanding: move to Postgres past
+roughly ten active users, and remember that a determined attacker with full host
+access can still read a signed-in session's memory.
+
+### 13. Campus SSO and spend limits
+
+Accounts, roles and per-user API keys now ship. The next step for a departmental
+deployment is OIDC against campus SSO, so nobody manages another password and
+account creation follows the directory rather than your attention.
+
+Worth adding alongside it: a **per-account spend ceiling**. The usage ledger
+already records cost per user, so enforcing "stop at $5 this month" is a check
+before each run rather than new infrastructure. An accidental 40-question run on
+a three-hour recording should not be able to surprise anyone.
 
 ### 14. Docker + GPU
 
@@ -199,5 +216,8 @@ the generator itself.
 | Gemini's free tier is rate-limited | A long lecture can trip requests-per-minute limits; the client retries with backoff, but a paid key is smoother |
 | Streamlit Cloud caps at `small` | Accented or noisy audio transcribes poorly there |
 | Alternative sets live only in the session | Closing the tab loses every set but the one you exported (Tier 2 #10 fixes this) |
+| Dropbox has no locking | Simultaneous saves are detected and retried, not merged; fine for a few users, not a department |
+| Losing APP_SECRET loses every account | Rotation now exists (`scripts/rotate_key.py`) but needs the *current* secret; back it up where you back up passwords |
+| Issued keys and the management key are app-readable | By design — an admin must mint keys for absent users. They are capped and revocable, which is the trade |
 | Single-user session state | Two people using one deployment share nothing but also collide on nothing; there is no saved work |
 | QTI 1.2 tested against Canvas semantics only | Other LMSs accept the package but may map feedback fields differently |

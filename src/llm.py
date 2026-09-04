@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -113,6 +114,10 @@ class LLMClient:
     usage: Usage = field(default_factory=Usage)
     app_name: str = "Lecture Quiz Builder"
     app_url: str = "https://github.com/"
+    # Fired after every request with (input_tokens, output_tokens, rate-or-None).
+    # This is what lets the sidebar count up during a run instead of only at the
+    # end; rate is None when the model has no published price.
+    on_usage: Callable[[int, int, tuple[float, float] | None], None] | None = None
 
     def __post_init__(self) -> None:
         self.spec: Provider = get_provider(self.provider)
@@ -165,6 +170,12 @@ class LLMClient:
     # Completion
     # ------------------------------------------------------------------ #
 
+    def _account(self, input_tokens: int, output_tokens: int) -> None:
+        """Record one call's tokens and notify any live meter watching."""
+        self.usage.add(Usage(input_tokens, output_tokens, 1))
+        if self.on_usage is not None:
+            self.on_usage(input_tokens, output_tokens, PRICING.get(self.model))
+
     @retry(
         retry=retry_if_exception_type(TransientLLMError),
         wait=wait_exponential(multiplier=2, min=2, max=30),
@@ -209,16 +220,10 @@ class LLMClient:
         )
 
         meta = getattr(resp, "usage_metadata", None)
-        if meta:
-            self.usage.add(
-                Usage(
-                    int(getattr(meta, "prompt_token_count", 0) or 0),
-                    int(getattr(meta, "candidates_token_count", 0) or 0),
-                    1,
-                )
-            )
-        else:
-            self.usage.add(Usage(0, 0, 1))
+        self._account(
+            int(getattr(meta, "prompt_token_count", 0) or 0) if meta else 0,
+            int(getattr(meta, "candidates_token_count", 0) or 0) if meta else 0,
+        )
 
         text = getattr(resp, "text", None)
         if not text:
@@ -241,7 +246,7 @@ class LLMClient:
             system=system,
             messages=[{"role": "user", "content": user}],
         )
-        self.usage.add(Usage(resp.usage.input_tokens, resp.usage.output_tokens, 1))
+        self._account(resp.usage.input_tokens, resp.usage.output_tokens)
         return "".join(block.text for block in resp.content if block.type == "text")
 
     def _complete_openai(self, system: str, user: str, tokens: int, json_mode: bool) -> str:
@@ -260,16 +265,10 @@ class LLMClient:
         resp = self._client.chat.completions.create(**kwargs)
 
         usage = getattr(resp, "usage", None)
-        if usage:
-            self.usage.add(
-                Usage(
-                    int(getattr(usage, "prompt_tokens", 0) or 0),
-                    int(getattr(usage, "completion_tokens", 0) or 0),
-                    1,
-                )
-            )
-        else:
-            self.usage.add(Usage(0, 0, 1))
+        self._account(
+            int(getattr(usage, "prompt_tokens", 0) or 0) if usage else 0,
+            int(getattr(usage, "completion_tokens", 0) or 0) if usage else 0,
+        )
 
         choices = getattr(resp, "choices", None) or []
         if not choices:

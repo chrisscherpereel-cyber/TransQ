@@ -17,6 +17,7 @@ from collections import Counter
 from collections.abc import Callable
 
 from . import prompts
+from .chunking import allocate_questions
 from .llm import LLMClient
 from .schema import MCQ, Chunk, format_timestamp, parse_timestamp
 
@@ -128,6 +129,193 @@ def generate_questions(
 
     if progress:
         progress(1.0, f"Drafted {len(questions)} questions")
+    return questions
+
+
+def _allocate_topup(shortfall: int, chunks: list[Chunk], offset: int) -> list[int]:
+    """Spread a shortfall round-robin, starting where the last round stopped.
+
+    Rotating the starting point matters: always restarting at chunk 0 would make
+    every top-up round hammer the opening minutes of the lecture, which is
+    exactly the part already best covered.
+    """
+    counts = [0] * len(chunks)
+    for i in range(shortfall):
+        counts[(offset + i) % len(chunks)] += 1
+    return counts
+
+
+def generate_question_set(
+    client: LLMClient,
+    chunks: list[Chunk],
+    target: int,
+    n_options: int = 4,
+    bloom_targets: list[str] | None = None,
+    difficulty_mix: str = "Balanced",
+    course_context: str = "",
+    do_review: bool = True,
+    max_rounds: int = 3,
+    progress: ProgressFn | None = None,
+) -> tuple[list[MCQ], list[str]]:
+    """Produce ``target`` usable questions — not "roughly target".
+
+    A single generation pass reliably under-delivers, for three compounding
+    reasons, none of which used to be corrected:
+
+    1. Asked for 3 questions from a chunk, a model often returns 2.
+    2. Malformed items (bad ``correct_index``, two options, truncated JSON) are
+       dropped during parsing.
+    3. The review pass then *drops* weak items, shrinking the set again.
+
+    So the count is now enforced rather than hoped for: generate, count what
+    survived, and run further rounds for the shortfall — including after the
+    review pass, so an item the reviewer rejected is replaced instead of simply
+    lost. Extra items beyond the target are kept in the bank but unchecked, and
+    if the lecture genuinely cannot support the request, that is reported as a
+    note instead of quietly handing back fewer.
+
+    Returns ``(questions, notes)``.
+    """
+    notes: list[str] = []
+    if not chunks or target <= 0:
+        return [], notes
+
+    bloom_targets = bloom_targets or ["Remember", "Understand", "Apply", "Analyze"]
+    common = dict(
+        n_options=n_options,
+        bloom_targets=bloom_targets,
+        difficulty_mix=difficulty_mix,
+        course_context=course_context,
+    )
+
+    questions: list[MCQ] = []
+    rotation = 0
+
+    def _emit(fraction: float, message: str) -> None:
+        if progress:
+            progress(fraction, message)
+
+    # --- Round 1: the straightforward pass ------------------------------- #
+    questions = generate_questions(
+        client,
+        chunks,
+        allocate_questions(target, len(chunks)),
+        avoid_stems=[],
+        progress=lambda f, m: _emit(f * 0.5, m),
+        **common,
+    )
+    questions = _drop_duplicates(questions)
+
+    # --- Top-up rounds --------------------------------------------------- #
+    for round_no in range(2, max_rounds + 1):
+        shortfall = target - len(questions)
+        if shortfall <= 0:
+            break
+        rotation += max(1, len(questions))
+        _emit(
+            0.5 + (round_no - 2) * 0.1,
+            f"Only {len(questions)} of {target} so far — writing {shortfall} more",
+        )
+        extra = generate_questions(
+            client,
+            chunks,
+            _allocate_topup(shortfall, chunks, rotation),
+            avoid_stems=[q.stem for q in questions],
+            **common,
+        )
+        before = len(questions)
+        questions = _drop_duplicates(questions + extra)
+        if len(questions) == before:
+            # Another round will not help if this one added nothing usable.
+            notes.append(
+                f"Stopped topping up after round {round_no}: the model returned "
+                "nothing new for this material."
+            )
+            break
+
+    # --- Review, then replace whatever it dropped ------------------------ #
+    if do_review and questions:
+        _emit(0.8, "Reviewing drafted questions")
+        questions, _ = critique_and_revise(client, questions)
+
+        dropped = [q for q in questions if not q.include]
+        if dropped and len(_included(questions)) < target:
+            need = target - len(_included(questions))
+            _emit(0.9, f"Reviewer dropped {len(dropped)} — writing {need} replacement(s)")
+            rotation += len(questions)
+            replacements = generate_questions(
+                client,
+                chunks,
+                _allocate_topup(need, chunks, rotation),
+                avoid_stems=[q.stem for q in questions],
+                **common,
+            )
+            questions = _drop_duplicates(questions + replacements)
+
+    # --- Settle on exactly `target` -------------------------------------- #
+    questions = balance_answer_positions(questions)
+    questions = validate_all(questions)
+    questions = _select_best(questions, target, notes)
+
+    _emit(1.0, f"{len(_included(questions))} questions ready")
+    return questions, notes
+
+
+def _included(questions: list[MCQ]) -> list[MCQ]:
+    return [q for q in questions if q.include]
+
+
+def _drop_duplicates(questions: list[MCQ]) -> list[MCQ]:
+    """Remove near-identical stems produced across rounds, keeping the first."""
+    kept: list[MCQ] = []
+    seen: list[set[str]] = []
+    for q in questions:
+        tokens = _content_tokens(q.stem)
+        if any(_jaccard(tokens, other) >= DROP_DUPLICATE_THRESHOLD for other in seen):
+            continue
+        kept.append(q)
+        seen.append(tokens)
+    return kept
+
+
+def _select_best(questions: list[MCQ], target: int, notes: list[str]) -> list[MCQ]:
+    """Check exactly ``target`` items, preferring the cleanest ones.
+
+    Surplus items are kept in the bank rather than thrown away — an instructor
+    who wanted ten and got thirteen usually wants to look at the other three.
+    """
+    reviewer_dropped = [q for q in questions if not q.include]
+    candidates = [q for q in questions if q.include]
+
+    # Fewest defects first; ties keep the original order, which follows the
+    # lecture, so the checked set stays spread across the recording.
+    ranked = sorted(
+        range(len(candidates)), key=lambda i: (len(candidates[i].flags), i)
+    )
+    chosen = {id(candidates[i]) for i in ranked[:target]}
+
+    for q in candidates:
+        if id(q) not in chosen:
+            q.include = False
+            q.flags = list(dict.fromkeys(q.flags + ["Extra — beyond the requested count"]))
+
+    kept = len(chosen)
+    if kept < target:
+        notes.append(
+            f"Asked for {target} questions; {kept} survived generation and review. "
+            "A longer recording, a lower question count, or a stronger model will "
+            "close the gap."
+        )
+    elif len(candidates) > target:
+        notes.append(
+            f"{len(candidates) - target} extra question(s) are in the bank, "
+            "unchecked — tick any of them to include it."
+        )
+    if reviewer_dropped:
+        notes.append(
+            f"The reviewer rejected {len(reviewer_dropped)} draft(s); they are kept "
+            "unchecked so you can see what was cut and why."
+        )
     return questions
 
 
@@ -300,7 +488,11 @@ STOPWORDS = {
     "was", "were", "what", "when", "which", "who", "why", "will", "with",
 }
 
+# Flagging is advisory, so it can afford to be sensitive. Dropping destroys work,
+# so it needs a higher bar: two questions about the same concept legitimately
+# share a lot of vocabulary, and only near-identical wording should be discarded.
 DUPLICATE_THRESHOLD = 0.7
+DROP_DUPLICATE_THRESHOLD = 0.85
 
 
 def _content_tokens(text: str) -> set[str]:
