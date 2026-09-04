@@ -82,6 +82,15 @@ PRICING: dict[str, tuple[float, float]] = {
 }
 
 
+def register_pricing(rates: dict[str, tuple[float, float]]) -> None:
+    """Merge live prices (currently OpenRouter's catalog) into the table.
+
+    Live figures beat the static ones above, which are only a starting point for
+    providers with no price API.
+    """
+    PRICING.update(rates)
+
+
 def estimate_cost(model: str, usage: Usage) -> float:
     """Best-effort USD estimate. Returns 0.0 for models with no listed price."""
     inp, out = PRICING.get(model, (0.0, 0.0))

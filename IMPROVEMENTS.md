@@ -194,7 +194,8 @@ the generator itself.
 | Bloom self-labeling is unreliable | The model's "Analyze" is often Understand; treat labels as hints |
 | Overlapping upload parts are transcribed twice | Split on clean boundaries; the app assumes parts are contiguous and does not detect or trim overlap |
 | A skipped (silent) part shortens the timeline | Timestamps after the gap are off by that part's length; the app warns which part was dropped |
-| OpenRouter costs are approximate | It routes to whichever upstream host is cheapest at the moment; custom slugs show tokens only |
+| OpenRouter costs are approximate | Prices come live from its catalog, but it routes to whichever upstream host is cheapest at the moment; uncatalogued slugs show tokens only |
+| Free OpenRouter models are rate-limited and weaker | Usable for a trial run; expect more items caught by the validators |
 | Gemini's free tier is rate-limited | A long lecture can trip requests-per-minute limits; the client retries with backoff, but a paid key is smoother |
 | Streamlit Cloud caps at `small` | Accented or noisy audio transcribes poorly there |
 | Alternative sets live only in the session | Closing the tab loses every set but the one you exported (Tier 2 #10 fixes this) |

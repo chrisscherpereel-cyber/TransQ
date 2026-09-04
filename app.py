@@ -41,7 +41,8 @@ from src.exporters.transcript_formats import (
     export_txt,
     export_vtt,
 )
-from src.llm import LLMClient, LLMError, estimate_cost, has_pricing
+from src.llm import LLMClient, LLMError, estimate_cost, has_pricing, register_pricing
+from src.openrouter_catalog import ORModel, load_models, pricing_map, vendors
 from src.mcq import (
     balance_answer_positions,
     coverage_report,
@@ -80,6 +81,16 @@ def get_whisper(model_size: str, compute_type: str):
     return load_model(model_size, compute_type)
 
 
+@st.cache_data(ttl=3600, show_spinner="Loading the OpenRouter model list…")
+def get_openrouter_models(_nonce: int = 0) -> tuple[list[ORModel], str | None]:
+    """The live catalog, refreshed hourly.
+
+    ``_nonce`` is not used by the function — bumping it is how the refresh button
+    busts Streamlit's cache without waiting out the hour.
+    """
+    return load_models()
+
+
 def init_state() -> None:
     defaults = {
         "transcript": None,
@@ -93,6 +104,7 @@ def init_state() -> None:
         "usage_priced": True,
         "source_filename": "",
         "authenticated": False,
+        "catalog_nonce": 0,
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -126,6 +138,72 @@ def password_gate() -> bool:
 # --------------------------------------------------------------------------- #
 # Sidebar
 # --------------------------------------------------------------------------- #
+
+
+def openrouter_model_picker(default_slug: str) -> str:
+    """Every model OpenRouter currently carries, A–Z, free ones marked.
+
+    The list is fetched live rather than hardcoded: OpenRouter's roster turns
+    over weekly, so a baked-in list would offer retired models and hide new ones.
+    """
+    catalog, warning = get_openrouter_models(st.session_state.catalog_nonce)
+    register_pricing(pricing_map(catalog))
+
+    if warning:
+        st.warning(warning, icon="📶")
+
+    free_only = st.checkbox(
+        "Free models only",
+        value=False,
+        help="Models OpenRouter serves at $0. They are rate-limited and often "
+        "smaller — fine for trying the app out, weaker at following the "
+        "item-writing rules.",
+    )
+    vendor_names = vendors(catalog)
+    chosen_vendors = st.multiselect(
+        "Filter by vendor", vendor_names, default=[], placeholder="All vendors"
+    )
+
+    shown = [
+        m
+        for m in catalog
+        if (not free_only or m.is_free)
+        and (not chosen_vendors or m.vendor in chosen_vendors)
+    ]
+
+    if not shown:
+        st.info("No models match those filters.")
+        shown = catalog
+
+    slugs = [m.id for m in shown]
+    labels = {m.id: m.option_label for m in shown}
+    index = slugs.index(default_slug) if default_slug in slugs else 0
+
+    free_count = sum(1 for m in catalog if m.is_free)
+    st.caption(
+        f"{len(shown)} of {len(catalog)} models · {free_count} free · "
+        f"{'bundled snapshot' if warning else 'live from openrouter.ai'}"
+    )
+
+    selected = st.selectbox(
+        "Model",
+        slugs,
+        index=index,
+        format_func=lambda slug: labels.get(slug, slug),
+        help="Type to search. Sorted alphabetically; 🆓 marks models priced at $0.",
+    )
+
+    c1, c2 = st.columns([1, 1])
+    if c1.button("↻ Refresh list", use_container_width=True):
+        st.session_state.catalog_nonce += 1
+        get_openrouter_models.clear()
+        st.rerun()
+    custom = c2.text_input(
+        "Or a slug", value="", placeholder="vendor/model",
+        help="Anything not in the list — a brand-new model, or a variant.",
+    ).strip()
+
+    return custom or selected
 
 
 def sidebar() -> AppSettings:
@@ -165,17 +243,11 @@ def sidebar() -> AppSettings:
             if spec.note:
                 st.caption(spec.note)
 
-            models = list(spec.models)
-            if spec.allow_custom_model:
-                models.append("Other (type a model slug)…")
-            s.llm_model = st.selectbox("Model", models, key=f"model_{s.provider}")
-            if s.llm_model.startswith("Other ("):
-                s.llm_model = st.text_input(
-                    "Model slug",
-                    value=spec.models[0],
-                    help="Any slug from openrouter.ai/models, e.g. "
-                    "`mistralai/mistral-large` or `qwen/qwen3-max`.",
-                ).strip()
+            if s.provider == "openrouter":
+                s.llm_model = openrouter_model_picker(spec.models[0])
+            else:
+                models = list(spec.models)
+                s.llm_model = st.selectbox("Model", models, key=f"model_{s.provider}")
 
             if get_secret(spec.env_var):
                 st.success(f"{spec.env_var} found in secrets", icon="✅")

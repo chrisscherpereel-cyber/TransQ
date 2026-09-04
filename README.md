@@ -126,17 +126,47 @@ Prompts live in `src/prompts.py` and are meant to be edited for your discipline.
 
 | Provider | Key | Where to get one | Notes |
 |---|---|---|---|
-| **OpenRouter** *(default)* | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key, any model — paste any slug from [openrouter.ai/models](https://openrouter.ai/models) |
+| **OpenRouter** *(default)* | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key, every model — the full catalog is fetched live and listed A–Z, free models marked |
 | Google Gemini | `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Free tier covers light use |
 | Anthropic Claude | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) | Best at following the item-writing rules |
 | OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | |
 | xAI Grok | `XAI_API_KEY` | [console.x.ai](https://console.x.ai) | OpenAI-compatible endpoint |
+
+#### The OpenRouter model list
+
+The full catalog is **fetched live** from `https://openrouter.ai/api/v1/models`
+(public, no key needed), cached for an hour, and listed **alphabetically** with
+🆓 marking every model OpenRouter serves at $0. A hardcoded list would be wrong
+within a month — OpenRouter's roster turns over weekly, and a stale list both
+offers retired models and hides new ones.
+
+Sidebar controls: **Free models only**, a vendor filter, type-to-search in the
+dropdown, **↻ Refresh list**, and a free-text box for any slug that isn't listed
+yet. Live prices from the catalog feed the cost estimator, so the figure in the
+sidebar reflects what the model actually costs today rather than a number written
+into this repo months ago.
+
+Two kinds of entry are filtered out, because the catalog carries more than this
+app can use:
+
+- **Image and video models** (Recraft, Wan, Hailuo) — they cannot return a quiz.
+- **`:batch` variants** — asynchronous batch endpoints that accept the request
+  but don't answer it interactively.
+
+If the fetch fails, a bundled snapshot is used and the sidebar says so in as many
+words. It is never presented as current.
 
 The default model is **`deepseek/deepseek-v4-pro`** — strong enough to follow the
 item-writing rules in the prompts, and roughly a tenth the price of the frontier
 alternatives. `deepseek/deepseek-v4-flash` is cheaper again if you're generating
 across a whole semester; `deepseek/deepseek-r1` is available but its reasoning
 output makes it slower here for no gain on this task.
+
+A note on the free models: they're genuinely free and fine for trying the app
+out, but they're rate-limited and generally smaller, and it shows in the
+questions — weaker adherence to the item-writing rules, more items caught by the
+validators. At around three cents a lecture for `deepseek-v4-pro`, free is rarely
+the economical choice once your time reviewing the output is counted.
 
 Adding a provider is a single entry in `PROVIDERS` in `src/config.py`. Anything
 that speaks the OpenAI `/chat/completions` protocol needs only a `base_url`;
@@ -226,6 +256,7 @@ lecture-quiz-builder/
 │   ├── transcribe.py             faster-whisper wrapper, multi-part stitching
 │   ├── chunking.py               time-window splitting, question allocation
 │   ├── llm.py                    five-provider abstraction, retries, cost
+│   ├── openrouter_catalog.py     live model list: fetch, filter, sort, free flags
 │   ├── prompts.py                every prompt, in one editable place
 │   ├── summarize.py              map-reduce summarization
 │   ├── mcq.py                    generation, validation, balancing, critique,
@@ -236,13 +267,14 @@ lecture-quiz-builder/
 │       ├── documents.py          DOCX, PDF, Markdown
 │       └── transcript_formats.py TXT, SRT, WebVTT
 └── tests/
-    ├── test_pipeline.py            schema, validation, balancing, all exporters
-    ├── test_llm_clients.py         provider wiring, against stubbed SDKs
-    └── test_multipart_and_regen.py part stitching, avoid-lists, replacement
+    ├── test_pipeline.py             schema, validation, balancing, all exporters
+    ├── test_llm_clients.py          provider wiring, against stubbed SDKs
+    ├── test_multipart_and_regen.py  part stitching, avoid-lists, replacement
+    └── test_openrouter_catalog.py   catalog parsing, filters, free detection
 ```
 
 ```bash
-pytest -q          # 81 tests, no API keys or network needed
+pytest -q          # 103 tests, no API keys or network needed
 ```
 
 ---
@@ -280,11 +312,15 @@ Transcription is free (local compute). Generation, for a 60-minute lecture
 | `gpt-4.1` | ~$0.09 |
 | `claude-sonnet-4-5` | ~$0.10 |
 
-The sidebar shows actual token counts and an estimated cost after each run.
-OpenRouter figures are approximate — it routes to whichever upstream host is
-cheapest or fastest at the moment, so the real rate moves; check the OpenRouter
-dashboard for actual spend. Any model slug typed into the custom box shows tokens
-but no dollar figure, which is the honest answer rather than a fabricated one.
+Free models on OpenRouter cost nothing at all — see the note above on what you
+give up.
+
+The sidebar shows actual token counts and an estimated cost after each run, using
+live prices from OpenRouter's catalog. They are still approximate: OpenRouter
+routes to whichever upstream host is cheapest or fastest at the moment, so the
+real rate moves. Check the OpenRouter dashboard for actual spend. A slug typed
+into the free-text box that isn't in the catalog shows tokens but no dollar
+figure, which is the honest answer rather than a fabricated one.
 
 An alternative set costs about the same as the original run. A single replacement
 costs one small call.

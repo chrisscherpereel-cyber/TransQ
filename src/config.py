@@ -62,6 +62,10 @@ class Provider:
     label: str
     sdk: str
     env_var: str
+    # For most providers this is the model dropdown. For OpenRouter it is only a
+    # seed — the first entry is the default selection, and the real list is
+    # fetched live in src/openrouter_catalog.py because that roster changes
+    # weekly and a hardcoded copy would be wrong within a month.
     models: tuple[str, ...]
     base_url: str | None = None
     supports_json_mode: bool = True
@@ -94,7 +98,7 @@ PROVIDERS: dict[str, Provider] = {
         supports_json_mode=False,
         allow_custom_model=True,
         console_url="https://openrouter.ai/keys",
-        note="Default. One key, any model — paste any slug from openrouter.ai/models.",
+        note="Default. The full model list is fetched live from OpenRouter.",
     ),
     "gemini": Provider(
         key="gemini",
