@@ -63,8 +63,10 @@ cp .env.example .env        # set APP_SECRET (required); an API key is optional
 streamlit run app.py
 ```
 
-`ffmpeg` is needed for some container formats. macOS: `brew install ffmpeg`.
-Ubuntu: `sudo apt install ffmpeg`. Windows: `winget install ffmpeg`.
+You do **not** need to install ffmpeg — audio decoding goes through `av` (PyAV),
+whose wheels ship FFmpeg compiled in. Install it only if you want the
+command-line tools for splitting recordings yourself: `brew install ffmpeg`
+(macOS), `sudo apt install ffmpeg` (Ubuntu), `winget install ffmpeg` (Windows).
 
 The first run downloads the Whisper weights (~150 MB for `small`) into
 `.cache/whisper/`. Subsequent runs are instant.
@@ -96,8 +98,11 @@ The first run downloads the Whisper weights (~150 MB for `small`) into
 4. Deploy, then open the app: it will ask you to create the administrator
    account. See [Accounts and persistence](#accounts-and-persistence).
 
-`requirements.txt` and `packages.txt` (which installs `ffmpeg`) are picked up
-automatically.
+`requirements.txt` is picked up automatically. There is deliberately **no
+`packages.txt`**: its presence makes Community Cloud run `apt-get` on every
+build, and an expired Debian repository on the platform's base image then fails
+the deploy before Python is reached — a breakage no app author can fix. Nothing
+here needs a system package. See [docs/DEPLOY_NOTES.md](docs/DEPLOY_NOTES.md).
 
 ### Community Cloud limits — read this before you rely on it
 
@@ -544,7 +549,6 @@ surprise before you get there.
 lecture-quiz-builder/
 ├── app.py                        Streamlit UI and pipeline orchestration
 ├── requirements.txt
-├── packages.txt                  apt packages for Streamlit Cloud (ffmpeg)
 ├── conftest.py
 ├── .streamlit/
 │   ├── config.toml               upload cap, theme
@@ -577,7 +581,8 @@ lecture-quiz-builder/
 │       ├── documents.py          DOCX, PDF, Markdown
 │       └── transcript_formats.py TXT, SRT, WebVTT
 ├── docs/
-│   └── DROPBOX.md                step-by-step encrypted-storage setup
+│   ├── DROPBOX.md                step-by-step encrypted-storage setup
+│   └── DEPLOY_NOTES.md           why there is no packages.txt
 ├── scripts/
 │   ├── rotate_key.py             re-encrypt everything under a new APP_SECRET
 │   ├── setup_dropbox.py          interactive OAuth: prints a secrets block
