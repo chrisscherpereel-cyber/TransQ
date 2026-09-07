@@ -57,7 +57,13 @@ class AppConfig:
 
     def set_secret(self, name: str, value: str) -> None:
         if self.cipher is None:
-            raise RuntimeError("Encryption is not configured, so secrets cannot be saved.")
+            raise RuntimeError(
+                "APP_SECRET is not set, so there is no key to encrypt this with. "
+                "Add it to .streamlit/secrets.toml (or your environment) and "
+                "restart the app. Generate one with:\n"
+                "    python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
+                "    (or, with no Python: openssl rand -base64 48)"
+            )
         values = self._load()
         if value:
             values[SECRET_PREFIX + name] = self.cipher.encrypt_config(value)

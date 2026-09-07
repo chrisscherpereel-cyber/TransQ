@@ -5,10 +5,10 @@ A secret you cannot rotate is a secret you will not rotate — including after y
 suspect it has leaked. This makes rotation a five-minute operation.
 
     # See what would change, without touching anything:
-    python scripts/rotate_key.py --dry-run
+    python3 scripts/rotate_key.py --dry-run
 
     # Do it:
-    python scripts/rotate_key.py --new-secret "$(python -c 'import secrets;print(secrets.token_urlsafe(48))')"
+    python3 scripts/rotate_key.py --new-secret "$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
 
 How it works: a new primary key is derived from the new secret, while every
 previous key is retained as a read-only fallback. Each document is decrypted with
@@ -135,7 +135,7 @@ def main() -> int:
     if args.new_secret and len(args.new_secret) < 32:
         print(
             "That secret is short. Generate one:\n"
-            "  python -c \"import secrets; print(secrets.token_urlsafe(48))\"",
+            "  python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"",
             file=sys.stderr,
         )
         return 2

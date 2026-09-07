@@ -527,7 +527,10 @@ class UserDirectory:
         account unable to run anything.
         """
         if self.cipher is None:
-            raise AuthError("Encryption is not configured, so keys cannot be saved.")
+            raise AuthError(
+                "APP_SECRET is not set, so there is no key to encrypt this with. "
+                "Set it and restart the app — see the README."
+            )
         user = self._require(username)
         user.issued_keys[provider] = self.cipher.encrypt_text(secret)
         user.provisioned_keys[provider] = dict(record)

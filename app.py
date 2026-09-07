@@ -1614,6 +1614,38 @@ def management_key_panel(config: AppConfig) -> None:
     """Configure the one key that mints all the others."""
     st.markdown("#### Issued API keys (OpenRouter)")
 
+    if config.cipher is None:
+        # Nothing here can work without a key to encrypt with, so say that
+        # plainly rather than letting someone paste a credential into a field
+        # that will refuse it.
+        st.error(
+            "**APP_SECRET is not set**, so this deployment has no encryption key "
+            "and nothing can be saved — not the management key, not accounts, not "
+            "settings. Everything you have entered so far lives in memory only "
+            "and disappears when the app restarts.",
+            icon="\U0001F511",
+        )
+        st.markdown(
+            "**To fix it:**\n\n"
+            "1. Generate a secret (`python3` on macOS — plain `python` is not "
+            "a command there):\n"
+            "   ```\n"
+            "   python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
+            "   # or, with no Python: openssl rand -base64 48\n"
+            "   ```\n"
+            "2. Add it where this app reads configuration:\n"
+            "   - **Streamlit Community Cloud** — Manage app -> Settings -> Secrets:\n"
+            "     ```toml\n"
+            '     APP_SECRET = "paste-it-here"\n'
+            "     ```\n"
+            "   - **Running locally** — put the same line in "
+            "`.streamlit/secrets.toml`, or `APP_SECRET=...` in `.env`.\n"
+            "3. Restart the app and create the administrator account again.\n\n"
+            "Keep that value backed up: it is the key to everything stored. "
+            "See **SECURITY.md** for rotation."
+        )
+        return
+
     try:
         configured = config.has_secret(MANAGEMENT_KEY_NAME)
     except StorageError as exc:
@@ -1924,6 +1956,19 @@ def main() -> None:
     )
     if backend_warning:
         st.warning(backend_warning, icon="⚠️")
+        if "APP_SECRET" in backend_warning:
+            with st.expander("How to set APP_SECRET", expanded=False):
+                st.markdown(
+                    "Generate one (`python3` on macOS):\n"
+                    "```\n"
+                    "python3 -c \"import secrets; print(secrets.token_urlsafe(48))\"\n"
+                    "# or: openssl rand -base64 48\n"
+                    "```\n"
+                    "Then add `APP_SECRET = \"...\"` to your Streamlit secrets "
+                    "(**Manage app → Settings → Secrets** on Community Cloud) or to "
+                    "`.streamlit/secrets.toml` locally, and restart. "
+                    "Until then nothing is saved between restarts."
+                )
 
     review = st.sidebar.checkbox(
         "Run a second-pass quality review",

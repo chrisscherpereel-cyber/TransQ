@@ -55,7 +55,7 @@ The app is built to make review fast, not to make it unnecessary.
 git clone https://github.com/<you>/lecture-quiz-builder.git
 cd lecture-quiz-builder
 
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+python3 -m venv .venv && source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
 cp .env.example .env        # set APP_SECRET (required); an API key is optional
@@ -317,7 +317,7 @@ easy mistake and an annoying one to undo.
   to admins and exportable. Credentials themselves are never logged.
 - **My security panel** — change your password (saved keys survive), or forget
   every personal key at once.
-- **Key rotation** — `python scripts/rotate_key.py --new-secret …` re-encrypts
+- **Key rotation** — `python3 scripts/rotate_key.py --new-secret …` re-encrypts
   the whole store, so `APP_SECRET` can actually be changed after an exposure.
 
 [SECURITY.md](SECURITY.md) explains the design, what it deliberately costs, and
@@ -362,8 +362,13 @@ revoke keys on your account. It is stored encrypted under `APP_SECRET`, and
 ### Setting `APP_SECRET`
 
 ```bash
-python -c "import secrets; print(secrets.token_urlsafe(48))"
+python3 -c "import secrets; print(secrets.token_urlsafe(48))"
+
+# No Python handy? openssl ships with macOS and most Linux distros:
+openssl rand -base64 48
 ```
+
+On macOS use `python3` — plain `python` is not a command there.
 
 Put it in `.streamlit/secrets.toml` (or `.env` locally). Everything stored is
 encrypted with a key derived from it: accounts, settings, API keys and the usage
