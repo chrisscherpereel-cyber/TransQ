@@ -222,6 +222,7 @@ def transcribe_parts(
     progress: ProgressFn | None = None,
     on_part_complete: Callable[[Transcript], None] | None = None,
     resume_from: Transcript | None = None,
+    remaining_after: list[str] | None = None,
 ) -> Transcript:
     """Transcribe several files in order and stitch them into one transcript.
 
@@ -246,6 +247,12 @@ def transcribe_parts(
     ``resume_from`` continues a checkpoint: the new parts are appended after
     everything it already contains. Splits are assumed contiguous and
     non-overlapping; overlapping parts duplicate the overlapping speech.
+
+    ``remaining_after`` names files this call will not touch but that still
+    belong to the lecture. It exists so a caller can hand over one part at a
+    time — bounding each run to a single part — without the resulting checkpoint
+    claiming the lecture is finished. Without it, transcribing part 2 of 5 alone
+    would write ``pending_parts = []`` and the other three would be forgotten.
     """
     if not audio_paths:
         raise TranscriptionError("No audio files were provided.")
@@ -267,7 +274,8 @@ def transcribe_parts(
         )
     )
     already_done = len(builder.parts)
-    total_parts = already_done + len(audio_paths)
+    trailing = list(remaining_after or [])
+    total_parts = already_done + len(audio_paths) + len(trailing)
 
     for i, (path, name) in enumerate(zip(audio_paths, names)):
         part_label = f"part {already_done + i + 1} of {total_parts} ({name})"
@@ -296,11 +304,11 @@ def transcribe_parts(
         except TranscriptionError as exc:
             # One unreadable or silent part should not throw away the rest.
             builder.skip(name, str(exc))
-            _checkpoint(builder, names[i + 1 :], on_part_complete)
+            _checkpoint(builder, names[i + 1 :] + trailing, on_part_complete)
             continue
 
         builder.add(part, name, part_durations[i], time.monotonic() - started)
-        _checkpoint(builder, names[i + 1 :], on_part_complete)
+        _checkpoint(builder, names[i + 1 :] + trailing, on_part_complete)
 
     if not builder.segments:
         raise TranscriptionError(
@@ -316,7 +324,7 @@ def transcribe_parts(
             f"{len(builder.segments)} segments{note}",
         )
 
-    return builder.build()
+    return builder.build(trailing)
 
 
 def _checkpoint(

@@ -479,3 +479,101 @@ def test_resuming_keeps_the_telemetry_of_the_earlier_parts(parts):
         resume_from=checkpoints[-1],
     )
     assert [p.finished_at for p in resumed.parts[:2]] == before
+
+
+# --------------------------------------------------------------------------- #
+# One part per run
+# --------------------------------------------------------------------------- #
+#
+# The final diagnosis on the reported deployment: memory flat, file fine, model
+# fitting comfortably — but a three-part lecture died every time on part 3, and
+# part 3 alone succeeded. What failed was the length of a single run. So the app
+# now hands over one part per script execution, and `remaining_after` is what
+# keeps a lecture whole while that happens.
+
+
+def one_part_at_a_time(model, paths, names, library, title="Split run"):
+    """Drive the whole lecture the way the app does: one call per part."""
+    entry_id = None
+    for index in range(len(paths)):
+        resume = library.load(entry_id).transcript if entry_id else None
+        transcript = transcribe_parts(
+            model,
+            [paths[index]],
+            display_names=[names[index]],
+            resume_from=resume,
+            remaining_after=names[index + 1 :],
+        )
+        entry_id = library.save(transcript, title=title, entry_id=entry_id).id
+    return library.load(entry_id).transcript
+
+
+def test_a_single_part_call_does_not_claim_the_lecture_is_finished(parts):
+    """Without remaining_after, transcribing part 1 of 3 alone would write
+    pending_parts=[] and the other two would be silently forgotten."""
+    names, paths = parts
+    first = transcribe_parts(
+        DyingWhisper(), paths[:1], display_names=names[:1],
+        remaining_after=names[1:],
+    )
+    assert first.pending_parts == names[1:]
+    assert not first.is_complete
+
+
+def test_the_last_part_completes_the_lecture(parts):
+    names, paths = parts
+    last = transcribe_parts(
+        DyingWhisper(), paths[2:], display_names=names[2:], remaining_after=[]
+    )
+    assert last.is_complete
+
+
+def test_one_part_per_run_produces_the_same_lecture_as_one_long_run(parts, library):
+    """The property that makes this safe to adopt: splitting the *runs* must not
+    change the transcript."""
+    names, paths = parts
+    stepwise = one_part_at_a_time(DyingWhisper(), paths, names, library)
+    in_one_go = transcribe_parts(DyingWhisper(), paths, display_names=names)
+
+    assert stepwise.text == in_one_go.text
+    assert stepwise.duration == pytest.approx(in_one_go.duration)
+    assert [p.offset for p in stepwise.parts] == [p.offset for p in in_one_go.parts]
+    assert [s.start for s in stepwise.segments] == [
+        s.start for s in in_one_go.segments
+    ]
+    assert [s.part for s in stepwise.segments] == [s.part for s in in_one_go.segments]
+    assert stepwise.is_complete
+
+
+def test_each_run_transcribes_exactly_one_file(parts, library):
+    """The whole point — no run may be longer than a single part."""
+    names, paths = parts
+    model = DyingWhisper()
+    one_part_at_a_time(model, paths, names, library)
+    assert model.calls == names, "each file read once, in order"
+
+
+def test_the_lecture_is_recoverable_between_every_run(parts, library):
+    """Stopping between runs — a closed laptop — must lose nothing."""
+    names, paths = parts
+    entry_id = None
+    for index in range(2):  # the user walks away after two parts
+        resume = library.load(entry_id).transcript if entry_id else None
+        transcript = transcribe_parts(
+            DyingWhisper(), [paths[index]], display_names=[names[index]],
+            resume_from=resume, remaining_after=names[index + 1 :],
+        )
+        entry_id = library.save(transcript, entry_id=entry_id).id
+
+    entry = library.entries()[0]
+    assert not entry.is_complete
+    assert entry.pending_parts == [names[2]]
+    assert library.load(entry_id).transcript.word_count > 0
+
+
+def test_a_single_file_lecture_needs_no_special_casing(parts, library):
+    names, paths = parts
+    only = transcribe_parts(
+        DyingWhisper(), paths[:1], display_names=names[:1], remaining_after=[]
+    )
+    assert only.is_complete and not only.is_multipart

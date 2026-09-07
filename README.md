@@ -112,11 +112,15 @@ consequences:
   works, and blocking it would remove a setup people rely on.
 - **Transcription is roughly 0.35× real time on `small`** — a 50-minute lecture
   takes about 18 minutes. The app shows an estimate before it starts.
-- **A split recording is checkpointed part by part.** Each part is saved to your
-  library the moment it finishes, and reopening the app offers to transcribe only
-  the parts that are missing. An interruption costs one part, not the lecture.
-  This matters because a killed container raises no exception — there is nothing
-  to catch, so anything not already written down is gone.
+- **A split recording is transcribed one part per run, and checkpointed.** Each
+  part gets its own short script run, is saved the moment it finishes, and the
+  next part is scheduled after it. This is what keeps a long lecture from being
+  cut off: the platform is never asked for a half-hour unbroken run, only for a
+  series of short ones. Reopening the app offers to finish anything left, so an
+  interruption costs one part rather than the lecture — which matters because a
+  killed container raises no exception, and anything not already written down is
+  gone. Continuing does depend on the browser tab staying open; close it and the
+  lecture pauses safely rather than failing.
 - **Apps sleep after inactivity** and cold-start by re-downloading the model.
   Expect a slow first request after idle time.
 - **Uploads are capped at 400 MB** by `.streamlit/config.toml`. A 90-minute MP3
@@ -592,7 +596,7 @@ lecture-quiz-builder/
 `scripts/check_dropbox.py` verifies Dropbox end to end before you rely on it.
 
 ```bash
-pytest -q          # 366 tests, no API keys or network needed
+pytest -q          # 372 tests, no API keys or network needed
 ```
 
 ---

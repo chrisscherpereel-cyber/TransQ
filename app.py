@@ -73,7 +73,13 @@ from src.provisioning import (
     key_name_for,
 )
 from src.schema import OPTION_LETTERS, Quiz, QuizMeta, Summary, Transcript, format_timestamp
-from src.storage import Cipher, StorageError, build_store, dropbox_credentials
+from src.storage import (
+    DROPBOX_KEYS,
+    Cipher,
+    StorageError,
+    build_store,
+    dropbox_credentials,
+)
 from src.summarize import summarize_transcript
 from src.hostinfo import available_memory_gb, check_model_fits, describe_host
 from src.transcribe import (
@@ -166,6 +172,9 @@ def init_state() -> None:
         "run_report": None,
         "library_id": None,
         "source_filename": "",
+        # A queued multi-part transcription: one part is done per script run,
+        # so this survives between runs. See run_transcription for why.
+        "job": None,
         "catalog_nonce": 0,
         "user": None,
         "dek": None,
@@ -437,27 +446,46 @@ def storage_status() -> None:
     else:
         st.caption(f"💾 Storage: **{name}**")
 
-    # The sidebar line used to state the symptom and point at a file. The
-    # question it provokes is "but why?", and the app already knows the answer,
-    # so it should give it here rather than sending anyone to read documentation
-    # about a step they may have completed correctly.
+    # Point at the diagnostics panel rather than explaining here. This used to
+    # be a collapsed expander in the sidebar and went unfound — a fourth
+    # expander among three others, with a label unlike theirs. The panel on the
+    # main page is where people actually look, so the explanation lives there
+    # and this is a signpost.
     if reason:
-        with st.expander("Why isn't this saving?", expanded=False):
-            st.warning(reason, icon="💾")
-            present, missing = dropbox_credentials(
-                {key: get_secret(key) for key in SECRET_KEYS}
-            )
-            if present or missing:
-                st.markdown(
-                    "\n".join(
-                        f"- {'✅' if k in present else '❌'} `{k}`"
-                        for k in (*present, *missing)
-                    )
-                )
-            st.caption(
-                "Names must match exactly, and all three are required. "
-                "On Community Cloud: **Manage app → Settings → Secrets**."
-            )
+        st.caption("Open **🩺 Diagnostics** on the main page to see why.")
+
+
+def dropbox_credential_checklist() -> None:
+    """Which of the three secrets the app can actually see.
+
+    A tick list beats prose here: a misspelled key name in Streamlit secrets is
+    invisible in every other view — the app simply behaves as though Dropbox was
+    never configured — and one glance at this settles it.
+    """
+    present, missing = dropbox_credentials(
+        {key: get_secret(key) for key in SECRET_KEYS}
+    )
+    st.markdown(
+        "\n".join(
+            f"- {'✅' if key in present else '❌'} `{key}`"
+            for key in (*DROPBOX_KEYS,)
+        )
+    )
+    if missing:
+        st.caption(
+            "❌ means the app cannot see that value at all — usually a "
+            "misspelled name rather than a wrong secret. All three are required, "
+            "spelled exactly as above. On Community Cloud they go in "
+            "**Manage app → Settings → Secrets**; locally, in "
+            "`.streamlit/secrets.toml`."
+        )
+    else:
+        st.caption(
+            "All three are present, so the names are right and the problem is "
+            "the credentials themselves — most often a token generated before "
+            "the four permissions were submitted in the Dropbox App Console. "
+            "`python3 scripts/check_dropbox.py` tests them directly."
+        )
 
 
 def interrupted_run_detail(library: TranscriptLibrary, entry: LibraryEntry) -> None:
@@ -543,9 +571,11 @@ def diagnostics_panel(settings: AppSettings, user: User) -> None:
             f"**Storage** · {getattr(store, 'name', 'unavailable')} "
             + ("✅ survives restarts" if durable else "❌ wiped on restart")
         )
-        reason = getattr(store, "fallback_reason", "")
-        if reason:
-            st.caption(reason)
+        if not durable:
+            reason = getattr(store, "fallback_reason", "")
+            if reason:
+                st.caption(reason)
+            dropbox_credential_checklist()
 
         st.markdown(f"**This server** · {describe_host()}")
         verdict = check_model_fits(settings.whisper_model, settings.compute_type)
@@ -619,6 +649,14 @@ def sidebar(directory: UserDirectory, user: User) -> AppSettings:
             s.language = None if lang == "Auto-detect" else lang
             s.vad_filter = st.checkbox("Skip silence (voice-activity filter)", value=True)
             s.beam_size = st.slider("Beam size", 1, 5, 1)
+            st.checkbox(
+                "Continue to the next part automatically",
+                value=True,
+                key="auto_continue",
+                help="Each part is transcribed in its own short run, which is what "
+                "keeps a long lecture from being cut off. Uncheck to press "
+                "Continue yourself between parts.",
+            )
 
         with st.expander("Question generation", expanded=True):
             provider_keys = list(PROVIDERS)
@@ -1037,13 +1075,43 @@ def checkpoint_saver(user: User, origin: str):
     return save
 
 
+def discard_job() -> None:
+    """Forget the current job and delete its temporary audio."""
+    job = st.session_state.pop("job", None)
+    if not job:
+        return
+    for path in job.get("paths", []):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def run_transcription(
     uploaded: list,
     settings: AppSettings,
     user: User,
     resume_from: Transcript | None = None,
 ) -> None:
-    """Transcribe one file, or several parts of a split recording, in order."""
+    """Queue a lecture and hand control back, one part per script run.
+
+    The evidence that led here: a three-part lecture died on part 3 every time,
+    and part 3 transcribed perfectly when run on its own. Memory was flat, the
+    file was fine, the model fit. What failed was the *length of the run* — an
+    unbroken half-hour of work in one Streamlit script execution.
+
+    So the fix is not to make the work faster or lighter. It is to stop asking
+    the platform for a long run at all: each script execution transcribes exactly
+    one part, saves it, and schedules the next. Every run is then about as long
+    as the run we know succeeds. Whatever the real ceiling is — a platform
+    timeout, a watchdog, a dropped websocket — this stays under it without
+    needing to know its value.
+
+    The cost is honest: continuing depends on the browser triggering the next
+    run, so a closed laptop pauses the lecture rather than finishing it. It does
+    not *lose* anything, because every finished part is already saved, and the
+    resume panel picks it up whenever you come back.
+    """
     verdict = check_model_fits(settings.whisper_model, settings.compute_type)
     if not verdict.allowed:
         st.error(verdict.message, icon="🧠")
@@ -1051,9 +1119,9 @@ def run_transcription(
     if verdict.level == "tight":
         st.warning(verdict.message, icon="🧠")
 
+    discard_job()  # a new lecture supersedes anything half-queued
     paths: list[str] = []
     names: list[str] = []
-
     for item in uploaded:
         suffix = os.path.splitext(item.name)[1] or ".mp3"
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -1061,47 +1129,109 @@ def run_transcription(
             paths.append(tmp.name)
             names.append(item.name)
 
-    # Set the title before transcribing, so the first checkpoint is already
-    # filed under a recognisable name rather than "Lecture (25:00)".
     if resume_from is None:
+        # Name it before the first checkpoint, so what lands in the library is
+        # recognisable rather than "Lecture (25:00)".
         st.session_state.library_id = None
         st.session_state.source_filename = (
             names[0] if len(names) == 1 else f"{os.path.splitext(names[0])[0]}_combined"
         )
 
-    try:
-        durations = [probe_duration(p) for p in paths]
-        total = sum(durations)
-        if total:
-            est = estimate_transcription_minutes(total, settings.whisper_model)
-            noun = "part" if len(paths) == 1 else "parts"
-            st.info(
-                f"{len(paths)} {noun} · combined length {format_timestamp(total)} · "
-                f"estimated transcription time ~{est:.1f} min on this server."
-            )
-        if len(paths) > 1:
-            st.caption(
-                "Each part is saved to your library as it finishes, so an "
-                "interruption costs you one part rather than the whole lecture."
-            )
+    st.session_state.job = {
+        "paths": paths,
+        "names": names,
+        "index": 0,
+        "auto": st.session_state.get("auto_continue", True),
+        "resuming": resume_from is not None,
+    }
+    st.rerun()
+
+
+def transcription_job(settings: AppSettings, user: User) -> bool:
+    """Run the next part of a queued lecture. Returns True if a job is active.
+
+    One part per call, deliberately. See :func:`run_transcription` for why.
+    """
+    job = st.session_state.get("job")
+    if not job:
+        return False
+
+    paths, names, index = job["paths"], job["names"], job["index"]
+    total = len(paths)
+    library = get_library(user)
+
+    with st.container(border=True):
+        st.markdown(f"### 🎙️ Transcribing — part {index + 1} of {total}")
+        st.caption(f"`{names[index]}` · {index} of {total} parts done so far")
+        st.progress(index / total)
+
+        if index == 0 and total > 1:
+            remaining = sum(probe_duration(p) for p in paths)
+            if remaining:
+                est = estimate_transcription_minutes(remaining, settings.whisper_model)
+                st.caption(
+                    f"About {est:.0f} minutes of work in total. Each part is saved "
+                    "as it finishes and runs separately, so this survives an "
+                    "interruption — but keep this tab open for it to continue."
+                )
+
+        # Continue from what is already saved, so the timeline joins correctly.
+        resume_from = None
+        if index > 0 or job["resuming"]:
+            entry_id = st.session_state.get("library_id")
+            if entry_id and library is not None:
+                try:
+                    resume_from = library.load(entry_id).transcript
+                except (LibraryError, StorageError) as exc:
+                    st.error(
+                        f"The parts already transcribed could not be reloaded: {exc}"
+                    )
+                    discard_job()
+                    return True
 
         bar = st.progress(0.0, text="Loading the Whisper model…")
-        model = get_whisper(settings.whisper_model, settings.compute_type)
-        transcript = transcribe_parts(
-            model,
-            paths,
-            display_names=names,
-            language=settings.language,
-            vad_filter=settings.vad_filter,
-            beam_size=settings.beam_size,
-            progress=lambda f, m: bar.progress(min(1.0, f), text=m),
-            on_part_complete=checkpoint_saver(user, origin="audio"),
-            resume_from=resume_from,
-        )
+        try:
+            model = get_whisper(settings.whisper_model, settings.compute_type)
+            transcript = transcribe_parts(
+                model,
+                [paths[index]],
+                display_names=[names[index]],
+                language=settings.language,
+                vad_filter=settings.vad_filter,
+                beam_size=settings.beam_size,
+                progress=lambda f, m: bar.progress(min(1.0, f), text=m),
+                on_part_complete=checkpoint_saver(user, origin="audio"),
+                resume_from=resume_from,
+                remaining_after=names[index + 1 :],
+            )
+        except TranscriptionError as exc:
+            bar.empty()
+            st.error(f"Part {index + 1} (`{names[index]}`) failed: {exc}")
+            st.caption(
+                "Earlier parts are saved. Fix or re-cut this file and use the "
+                "resume panel to continue."
+            )
+            discard_job()
+            return True
         bar.empty()
 
         st.session_state.transcript = transcript
         st.session_state.transcript_note = ""
+        job["index"] = index + 1
+
+        if job["index"] < total:
+            st.success(f"Part {index + 1} done and saved.")
+            if job["auto"]:
+                st.rerun()
+            st.button(
+                f"▶️ Continue with part {job['index'] + 1}",
+                type="primary",
+                key=f"continue_{job['index']}",
+            )
+            st.button("Stop here", key=f"stop_{job['index']}", on_click=discard_job)
+            return True
+
+        # Finished.
         reset_downstream()
         st.success(
             f"Transcribed {format_timestamp(transcript.duration)} of audio across "
@@ -1115,14 +1245,8 @@ def run_transcription(
                 icon="⚠️",
             )
         autosave_transcript(user, origin="audio")
-    except TranscriptionError as exc:
-        st.error(str(exc))
-    finally:
-        for path in paths:
-            try:
-                os.unlink(path)
-            except OSError:
-                pass
+        discard_job()
+    return True
 
 
 def run_transcript_import(uploaded, user: User) -> None:
@@ -1531,6 +1655,11 @@ def resume_panel(settings: AppSettings, user: User) -> bool:
 
 
 def input_section(settings: AppSettings, user: User, review: bool) -> None:
+    # A job in flight owns the screen: showing an upload form underneath an
+    # active transcription invites starting a second one on top of the first.
+    if transcription_job(settings, user):
+        return
+
     if resume_panel(settings, user):
         st.divider()
 
