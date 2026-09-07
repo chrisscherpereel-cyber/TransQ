@@ -31,6 +31,15 @@ class TransientLLMError(LLMError):
     """Rate limits, overloads, timeouts — worth retrying."""
 
 
+class TruncatedResponseError(LLMError):
+    """The model stopped mid-reply because it hit its output limit.
+
+    Worth its own type because it is the one failure with a specific, actionable
+    fix (ask for less at a time) and because retrying it unchanged just burns
+    tokens producing the same truncated answer.
+    """
+
+
 @dataclass
 class Usage:
     input_tokens: int = 0
@@ -194,6 +203,8 @@ class LLMClient:
                 return self._complete_anthropic(system, user, tokens)
             return self._complete_openai(system, user, tokens, json_mode)
         except (LLMError, TransientLLMError):
+            # Includes TruncatedResponseError: retrying it unchanged produces the
+            # same truncated reply and bills for it again.
             raise
         except Exception as exc:
             if _is_transient(exc):
@@ -225,12 +236,19 @@ class LLMClient:
             int(getattr(meta, "candidates_token_count", 0) or 0) if meta else 0,
         )
 
+        reason = ""
+        for candidate in getattr(resp, "candidates", None) or []:
+            reason = str(getattr(candidate, "finish_reason", "") or "")
+            break
+
         text = getattr(resp, "text", None)
+        if "MAX_TOKENS" in reason.upper():
+            raise TruncatedResponseError(
+                "Gemini stopped at its output limit — the reply is incomplete. "
+                "Ask for fewer questions per run, or use a shorter chunk length. "
+                "Gemini 3.x counts its reasoning against the output budget."
+            )
         if not text:
-            reason = ""
-            for candidate in getattr(resp, "candidates", None) or []:
-                reason = str(getattr(candidate, "finish_reason", "") or "")
-                break
             raise LLMError(
                 "Gemini returned no text"
                 + (f" (finish reason: {reason})." if reason else ".")
@@ -273,7 +291,16 @@ class LLMClient:
         choices = getattr(resp, "choices", None) or []
         if not choices:
             raise LLMError(f"{self.spec.label} returned no choices.")
-        return choices[0].message.content or ""
+
+        finish = str(getattr(choices[0], "finish_reason", "") or "").lower()
+        content = choices[0].message.content or ""
+        if finish == "length":
+            raise TruncatedResponseError(
+                f"{self.spec.label} stopped at its output limit after "
+                f"{len(content)} characters — the reply is incomplete. Ask for "
+                "fewer questions per run, or use a shorter chunk length."
+            )
+        return content
 
     def complete_json(
         self, system: str, user: str, max_tokens: int | None = None
@@ -288,6 +315,28 @@ class LLMClient:
         system = system.rstrip() + "\n\nRespond with a single valid JSON object and nothing else."
         raw = self.complete(system, user, max_tokens=max_tokens, json_mode=True)
         return parse_json_object(raw)
+
+
+def _looks_truncated(text: str) -> bool:
+    """Unbalanced braces mean the reply stopped early, not that it was nonsense."""
+    in_string, escaped, depth = False, False, 0
+    for char in text:
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+    return in_string or depth > 0
 
 
 def _is_transient(exc: Exception) -> bool:
@@ -327,10 +376,24 @@ def parse_json_object(raw: str) -> dict[str, Any]:
     except json.JSONDecodeError:
         start, end = text.find("{"), text.rfind("}")
         if start == -1 or end <= start:
+            # An opening brace with no closing one is the signature of a reply
+            # that ran out of room, which has a different fix from a model that
+            # simply ignored the format instruction.
+            if start != -1:
+                raise TruncatedResponseError(
+                    "The model's reply was cut off before the JSON closed "
+                    f"({len(text)} characters received). Ask for fewer questions "
+                    "per run, or use a shorter chunk length."
+                )
             raise LLMError(f"Could not find JSON in the model response: {text[:300]}")
         try:
             parsed = json.loads(text[start : end + 1])
         except json.JSONDecodeError as exc:
+            if _looks_truncated(text):
+                raise TruncatedResponseError(
+                    "The model's reply was cut off mid-JSON. Ask for fewer "
+                    "questions per run, or use a shorter chunk length."
+                ) from exc
             raise LLMError(f"Model returned malformed JSON: {exc}") from exc
 
     if not isinstance(parsed, dict):

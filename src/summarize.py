@@ -6,7 +6,8 @@ from collections.abc import Callable
 
 from . import prompts
 from .chunking import chunk_transcript
-from .llm import LLMClient
+from .diagnostics import FAILED, OK, PHASE_SUMMARY, RunReport, classify, short_reason
+from .llm import LLMClient, LLMError
 from .schema import Chunk, Summary, Transcript
 
 ProgressFn = Callable[[float, str], None]
@@ -43,12 +44,19 @@ def summarize_transcript(
     chunk_seconds: int = 600,
     overlap_seconds: int = 30,
     progress: ProgressFn | None = None,
+    report: RunReport | None = None,
 ) -> tuple[Summary, list[Chunk], list[dict]]:
     """Summarize a full transcript.
 
     Returns the synthesized summary plus the chunks and per-chunk summaries, so
     question generation can reuse them instead of paying for them twice.
+
+    One bad chunk still does not sink the run — but it is now *recorded*. If
+    every chunk fails, that is not a quiet empty summary, it is an error: the
+    old behaviour was to carry on and generate questions from nothing, which is
+    what made an expired key look like a lecture with nothing in it.
     """
+    report = report or RunReport()
     chunks = chunk_transcript(transcript, chunk_seconds, overlap_seconds)
     if not chunks:
         return Summary(), [], []
@@ -58,18 +66,41 @@ def summarize_transcript(
         if progress:
             progress(i / max(1, len(chunks)) * 0.8, f"Summarizing {chunk.label}")
         try:
-            sections.append(summarize_chunk(client, chunk, course_context))
+            section = summarize_chunk(client, chunk, course_context)
+            sections.append(section)
+            report.record(
+                PHASE_SUMMARY, chunk.label, OK,
+                produced=len(section.get("key_points") or []),
+            )
         except Exception as exc:  # one bad chunk should not sink the run
             sections.append(
                 {"_label": chunk.label, "_start": chunk.start,
                  "heading": f"Segment {i + 1}", "key_points": [],
                  "key_terms": [], "_error": str(exc)}
             )
+            report.record(
+                PHASE_SUMMARY, chunk.label, FAILED,
+                detail=short_reason(exc), cause=classify(exc),
+            )
+
+    if report.phase_failed_entirely(PHASE_SUMMARY):
+        raise LLMError(
+            f"Every one of the {len(chunks)} summary requests failed. "
+            f"Last reason: {report.failures[-1].detail}"
+        )
 
     if progress:
         progress(0.85, "Synthesizing the overall summary")
 
-    summary = _reduce(client, sections, course_context)
+    try:
+        summary = _reduce(client, sections, course_context)
+        report.record(PHASE_SUMMARY, "overall synthesis", OK)
+    except Exception as exc:
+        report.record(
+            PHASE_SUMMARY, "overall synthesis", FAILED,
+            detail=short_reason(exc), cause=classify(exc),
+        )
+        raise
 
     if progress:
         progress(1.0, "Summary complete")

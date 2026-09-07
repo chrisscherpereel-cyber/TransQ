@@ -180,10 +180,11 @@ def test_gemini_records_usage(fake_gemini):
     assert client.usage.calls == 1
 
 
-def test_gemini_empty_response_is_a_clear_error(fake_gemini, monkeypatch):
-    import google.genai as genai  # the stub
+def test_gemini_hitting_its_output_limit_is_reported_as_truncation(fake_gemini, monkeypatch):
+    """MAX_TOKENS has a specific fix, so it gets a specific error type."""
+    from src.llm import TruncatedResponseError
 
-    def blocked(**kwargs):
+    def truncated(**kwargs):
         return types.SimpleNamespace(
             text=None,
             usage_metadata=None,
@@ -191,10 +192,25 @@ def test_gemini_empty_response_is_a_clear_error(fake_gemini, monkeypatch):
         )
 
     client = LLMClient(provider="gemini", model="gemini-3.8-flash", api_key="k")
+    monkeypatch.setattr(client._client.models, "generate_content", truncated)
+    with pytest.raises(TruncatedResponseError) as exc:
+        client.complete_json("sys", "user")
+    assert "fewer questions" in str(exc.value)
+
+
+def test_gemini_blocked_response_is_still_a_clear_error(fake_gemini, monkeypatch):
+    def blocked(**kwargs):
+        return types.SimpleNamespace(
+            text=None,
+            usage_metadata=None,
+            candidates=[types.SimpleNamespace(finish_reason="SAFETY")],
+        )
+
+    client = LLMClient(provider="gemini", model="gemini-3.8-flash", api_key="k")
     monkeypatch.setattr(client._client.models, "generate_content", blocked)
     with pytest.raises(LLMError) as exc:
         client.complete_json("sys", "user")
-    assert "MAX_TOKENS" in str(exc.value)
+    assert "SAFETY" in str(exc.value)
 
 
 # --------------------------------------------------------------------------- #

@@ -18,7 +18,19 @@ from collections.abc import Callable
 
 from . import prompts
 from .chunking import allocate_questions
-from .llm import LLMClient
+from .diagnostics import (
+    EMPTY,
+    FAILED,
+    OK,
+    PHASE_GENERATE,
+    PHASE_REPLACE,
+    PHASE_REVIEW,
+    SKIPPED,
+    RunReport,
+    classify,
+    short_reason,
+)
+from .llm import LLMClient, LLMError, TruncatedResponseError
 from .schema import MCQ, Chunk, format_timestamp, parse_timestamp
 
 ProgressFn = Callable[[float, str], None]
@@ -65,6 +77,7 @@ def generate_questions(
     course_context: str = "",
     avoid_stems: list[str] | None = None,
     progress: ProgressFn | None = None,
+    report: RunReport | None = None,
 ) -> list[MCQ]:
     """Generate questions chunk by chunk, avoiding repeats across chunks.
 
@@ -82,6 +95,7 @@ def generate_questions(
         else ""
     )
 
+    report = report or RunReport()
     questions: list[MCQ] = []
     seen_topics: list[str] = []
     prior_stems = list(avoid_stems or [])
@@ -98,11 +112,11 @@ def generate_questions(
 
         avoid = _build_avoid_clause(seen_topics, prior_stems)
 
-        try:
-            data = client.complete_json(
+        def _ask(n: int, budget: int) -> dict:
+            return client.complete_json(
                 prompts.MCQ_SYSTEM.format(n_options=n_options),
                 prompts.MCQ_USER.format(
-                    n=want,
+                    n=n,
                     label=chunk.label,
                     course_context=context_block,
                     bloom_targets=", ".join(bloom_targets),
@@ -111,21 +125,55 @@ def generate_questions(
                     options_placeholder=options_placeholder,
                     text=_with_inline_timestamps(chunk)[:24000],
                 ),
-                max_tokens=max(2000, want * 700),
+                max_tokens=budget,
             )
+
+        try:
+            try:
+                data = _ask(want, max(2000, want * 700))
+            except TruncatedResponseError as exc:
+                # The model ran out of room mid-answer. Asking for half as many
+                # with a bigger budget usually succeeds, and half a chunk's
+                # questions beats none — the top-up rounds cover the rest.
+                reduced = max(1, want // 2)
+                report.record(
+                    PHASE_GENERATE, chunk.label, SKIPPED,
+                    detail=f"reply was cut off at {want} questions; retrying with {reduced}",
+                    cause=classify(exc),
+                )
+                if progress:
+                    progress(0.95, f"{chunk.label}: reply cut off, retrying smaller")
+                data = _ask(reduced, max(3000, reduced * 1200))
+                want = reduced
         except Exception as exc:
+            # Was: a progress message that the next repaint erased. A failure
+            # here is the single most likely reason a run "finishes" with
+            # nothing, so it has to leave a durable trace.
+            report.record(
+                PHASE_GENERATE, chunk.label, FAILED,
+                detail=short_reason(exc), cause=classify(exc),
+            )
             if progress:
-                progress(0.95, f"Skipped {chunk.label}: {exc}")
+                progress(0.95, f"{chunk.label} failed: {short_reason(exc)}")
             continue
 
+        produced_here = 0
         for raw in data.get("questions", []) or []:
             item = _coerce_mcq(raw, fallback_timestamp=format_timestamp(chunk.start))
             if item is None:
                 continue
             questions.append(item)
             prior_stems.append(item.stem)
+            produced_here += 1
             if item.topic:
                 seen_topics.append(item.topic)
+
+        report.record(
+            PHASE_GENERATE, chunk.label,
+            OK if produced_here else EMPTY,
+            detail="" if produced_here else f"asked for {want}, got nothing usable",
+            produced=produced_here,
+        )
 
     if progress:
         progress(1.0, f"Drafted {len(questions)} questions")
@@ -156,6 +204,7 @@ def generate_question_set(
     do_review: bool = True,
     max_rounds: int = 3,
     progress: ProgressFn | None = None,
+    report: RunReport | None = None,
 ) -> tuple[list[MCQ], list[str]]:
     """Produce ``target`` usable questions — not "roughly target".
 
@@ -177,6 +226,7 @@ def generate_question_set(
     Returns ``(questions, notes)``.
     """
     notes: list[str] = []
+    report = report or RunReport()
     if not chunks or target <= 0:
         return [], notes
 
@@ -202,9 +252,18 @@ def generate_question_set(
         allocate_questions(target, len(chunks)),
         avoid_stems=[],
         progress=lambda f, m: _emit(f * 0.5, m),
+        report=report,
         **common,
     )
     questions = _drop_duplicates(questions)
+
+    # Distinguish "the model could not be reached" from "this lecture is thin".
+    # The old code reported both as "returned nothing new for this material".
+    if report.phase_failed_entirely(PHASE_GENERATE):
+        raise LLMError(
+            f"Every question request failed. Last reason: "
+            f"{report.failures[-1].detail}"
+        )
 
     # --- Top-up rounds --------------------------------------------------- #
     for round_no in range(2, max_rounds + 1):
@@ -221,22 +280,32 @@ def generate_question_set(
             chunks,
             _allocate_topup(shortfall, chunks, rotation),
             avoid_stems=[q.stem for q in questions],
+            report=report,
             **common,
         )
         before = len(questions)
         questions = _drop_duplicates(questions + extra)
         if len(questions) == before:
-            # Another round will not help if this one added nothing usable.
-            notes.append(
-                f"Stopped topping up after round {round_no}: the model returned "
-                "nothing new for this material."
-            )
+            # Another round will not help if this one added nothing usable —
+            # but say *which* kind of nothing, since a failing API and a thin
+            # lecture need completely different responses from the reader.
+            recent = [s for s in report.phase_steps(PHASE_GENERATE) if s.is_failure]
+            if recent:
+                notes.append(
+                    f"Stopped topping up after round {round_no}: "
+                    f"{len(recent)} request(s) failed — {recent[-1].detail}"
+                )
+            else:
+                notes.append(
+                    f"Stopped topping up after round {round_no}: the model returned "
+                    "nothing new for this material."
+                )
             break
 
     # --- Review, then replace whatever it dropped ------------------------ #
     if do_review and questions:
         _emit(0.8, "Reviewing drafted questions")
-        questions, _ = critique_and_revise(client, questions)
+        questions, _ = critique_and_revise(client, questions, report=report)
 
         dropped = [q for q in questions if not q.include]
         if dropped and len(_included(questions)) < target:
@@ -248,6 +317,7 @@ def generate_question_set(
                 chunks,
                 _allocate_topup(need, chunks, rotation),
                 avoid_stems=[q.stem for q in questions],
+                report=report,
                 **common,
             )
             questions = _drop_duplicates(questions + replacements)
@@ -341,6 +411,7 @@ def generate_replacement(
     difficulty_mix: str = "Balanced",
     course_context: str = "",
     same_section: bool = True,
+    report: RunReport | None = None,
 ) -> MCQ | None:
     """Write one new question to stand in for ``question``.
 
@@ -357,6 +428,7 @@ def generate_replacement(
     else:
         pool = chunks
 
+    report = report or RunReport()
     avoid = [s for s in existing_stems if s]
     for chunk in pool:
         drafted = generate_questions(
@@ -368,6 +440,7 @@ def generate_replacement(
             difficulty_mix=difficulty_mix,
             course_context=course_context,
             avoid_stems=avoid,
+            report=report,
         )
         if drafted:
             new = drafted[0]
@@ -581,7 +654,10 @@ def coverage_report(questions: list[MCQ]) -> dict[str, dict[str, int]]:
 # --------------------------------------------------------------------------- #
 
 def critique_and_revise(
-    client: LLMClient, questions: list[MCQ], progress: ProgressFn | None = None
+    client: LLMClient,
+    questions: list[MCQ],
+    progress: ProgressFn | None = None,
+    report: RunReport | None = None,
 ) -> tuple[list[MCQ], list[dict]]:
     """Have the model review its own items and apply the revisions it proposes.
 
@@ -590,6 +666,7 @@ def critique_and_revise(
     improvement available here. Items marked "drop" are kept but unchecked, so
     the instructor sees what was rejected and why.
     """
+    report = report or RunReport()
     if not questions:
         return questions, []
 
@@ -615,7 +692,13 @@ def critique_and_revise(
             ),
             max_tokens=max(3000, len(questions) * 400),
         )
-    except Exception:
+    except Exception as exc:
+        # The review is optional, so a failure here must not lose the drafts —
+        # but silently skipping it made "why were none dropped?" unanswerable.
+        report.record(
+            PHASE_REVIEW, f"{len(questions)} questions", FAILED,
+            detail=short_reason(exc), cause=classify(exc),
+        )
         return questions, []
 
     by_id = {q.id: q for q in questions}
@@ -649,6 +732,9 @@ def critique_and_revise(
                     q.rationale = str(revised["rationale"])
                 q.flags = list(dict.fromkeys(q.flags + [f"Revised by reviewer: {i}" for i in issues]))
 
+    report.record(
+        PHASE_REVIEW, f"{len(questions)} questions", OK, produced=len(reviews)
+    )
     if progress:
         progress(1.0, "Review complete")
 

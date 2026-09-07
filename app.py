@@ -32,6 +32,7 @@ from src.accounts import (
     suggest_password,
 )
 from src.audit import AuditLog
+from src.diagnostics import PHASE_GENERATE, PHASE_SUMMARY, RunReport
 from src.appconfig import AppConfig
 from src.config import (
     AUDIO_EXTENSIONS,
@@ -159,6 +160,7 @@ def init_state() -> None:
         "active_version": 0,
         "chunks": [],
         "generation_notes": [],
+        "run_report": None,
         "source_filename": "",
         "catalog_nonce": 0,
         "user": None,
@@ -919,6 +921,11 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
         return
     meter = attach_meter(client, settings)
 
+    # The report outlives the progress bar. That is the whole point: a run that
+    # failed used to look exactly like a lecture with nothing to say.
+    report = RunReport()
+    st.session_state.run_report = report
+
     bar = st.progress(0.0, text="Summarizing…")
     try:
         summary, chunks, _ = summarize_transcript(
@@ -928,6 +935,7 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             chunk_seconds=settings.chunk_seconds,
             overlap_seconds=settings.chunk_overlap_seconds,
             progress=lambda f, m: bar.progress(f * 0.35, text=m),
+            report=report,
         )
         st.session_state.summary = summary
         st.session_state.chunks = chunks
@@ -942,28 +950,72 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             course_context=settings.course_context,
             do_review=do_review,
             progress=lambda f, m: bar.progress(0.35 + f * 0.65, text=m),
+            report=report,
         )
         st.session_state.generation_notes = notes
         store_version(build_quiz(questions, summary, settings, version=1))
         bar.empty()
-
-        included = len([q for q in questions if q.include])
-        if not questions:
-            st.warning("No questions could be generated. Try a different model.")
-        elif included < settings.num_questions:
-            st.warning(
-                f"Generated {included} of the {settings.num_questions} requested.",
-                icon="⚠️",
-            )
-        else:
-            st.success(f"Generated {included} questions.")
-        for note in notes:
-            st.caption(f"· {note}")
+        report_outcome(report, questions, notes, settings)
     except LLMError as exc:
         bar.empty()
-        st.error(str(exc))
+        st.error(f"**The run stopped early.** {exc}", icon="🛑")
+        show_run_report(report, expanded=True)
+        if report.advice():
+            st.info(report.advice(), icon="💡")
     finally:
         commit_usage(meter, user, "generate")
+
+
+def report_outcome(report: RunReport, questions, notes, settings: AppSettings) -> None:
+    """Say what happened — including the parts that failed silently before."""
+    included = len([q for q in questions if q.include])
+    failures = report.failures
+
+    if not questions:
+        st.error(
+            "**No questions were produced.** " + report.headline(), icon="🛑"
+        )
+    elif failures or included < settings.num_questions:
+        st.warning(
+            f"**Finished with gaps.** {included} of the "
+            f"{settings.num_questions} requested. {report.headline()}",
+            icon="⚠️",
+        )
+    else:
+        st.success(f"Generated {included} questions. {report.headline()}")
+
+    for note in notes:
+        st.caption(f"· {note}")
+
+    if failures:
+        if report.advice():
+            st.info(report.advice(), icon="💡")
+        show_run_report(report, expanded=True)
+    else:
+        show_run_report(report, expanded=False)
+
+
+def show_run_report(report: RunReport, expanded: bool = False) -> None:
+    """Every model call, and how it went."""
+    if not report.steps:
+        return
+    failures = len(report.failures)
+    title = (
+        f"⚠️ Run report — {failures} failed call(s)"
+        if failures
+        else f"Run report — {len(report.steps)} model calls, all fine"
+    )
+    with st.expander(title, expanded=expanded):
+        st.dataframe(
+            pd.DataFrame(report.as_rows()),
+            use_container_width=True,
+            hide_index=True,
+        )
+        if failures:
+            st.caption(
+                "Steps marked ✗ never reached the model, or came back unusable. "
+                "The questions you have were built from the steps that did work."
+            )
 
 
 def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> bool:
@@ -978,6 +1030,8 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
 
     bar = st.progress(0.0, text="Writing an alternative set…")
     try:
+        report = RunReport()
+        st.session_state.run_report = report
         questions, notes = generate_question_set(
             client,
             chunks,
@@ -988,10 +1042,14 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
             course_context=settings.course_context,
             do_review=do_review,
             progress=lambda f, m: bar.progress(f, text=m),
+            report=report,
         )
         bar.empty()
         if not questions:
-            st.warning("The alternative pass produced nothing usable.")
+            st.warning(f"The alternative pass produced nothing usable. {report.headline()}")
+            show_run_report(report, expanded=True)
+            if report.advice():
+                st.info(report.advice(), icon="💡")
             return False
 
         st.session_state.generation_notes = notes
@@ -1008,7 +1066,7 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
         return True
     except LLMError as exc:
         bar.empty()
-        st.error(str(exc))
+        st.error(f"**The alternative pass stopped early.** {exc}", icon="🛑")
         return False
     finally:
         commit_usage(meter, user, "alternative")
@@ -1026,6 +1084,7 @@ def run_replacement(
     if client is None:
         return
     meter = attach_meter(client, settings)
+    report = RunReport()
 
     old = quiz.questions[index]
     try:
@@ -1040,6 +1099,7 @@ def run_replacement(
                 difficulty_mix=settings.difficulty_mix,
                 course_context=settings.course_context,
                 same_section=same_section,
+                report=report,
             )
     except LLMError as exc:
         st.error(str(exc))
@@ -1048,7 +1108,12 @@ def run_replacement(
         commit_usage(meter, user, "replace")
 
     if new is None:
-        st.warning("Could not write a replacement for that question. Try again.")
+        st.warning(
+            f"Could not write a replacement for that question. {report.headline()}"
+        )
+        show_run_report(report, expanded=bool(report.failures))
+        if report.advice():
+            st.info(report.advice(), icon="💡")
         return
 
     quiz.questions[index] = new
@@ -1256,6 +1321,17 @@ def questions_tab(settings: AppSettings, user: User, review: bool) -> None:
 
     for note in st.session_state.generation_notes:
         st.caption(f"· {note}")
+
+    report = st.session_state.get("run_report")
+    if report is not None and report.failures:
+        st.warning(
+            f"The last run had problems: {report.headline()} "
+            "Some questions may be missing as a result.",
+            icon="⚠️",
+        )
+        if report.advice():
+            st.info(report.advice(), icon="💡")
+        show_run_report(report, expanded=False)
 
     if flagged:
         st.warning(

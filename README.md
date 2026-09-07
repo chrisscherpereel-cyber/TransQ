@@ -280,6 +280,34 @@ handles the 1.2 package more reliably.
 
 ---
 
+## When a run doesn't finish
+
+Every model call is recorded, and the **Run report** under the result shows each
+one — which part of the lecture it covered, whether it succeeded, and what went
+wrong if it didn't. It stays on screen after the progress bar disappears, and
+persists on the Questions tab, so a failed run can be diagnosed rather than
+guessed at.
+
+| What you see | What it means |
+|---|---|
+| **The run stopped early** | Every call in a stage failed — the error names the reason from the provider |
+| **Finished with gaps** | Some chunks failed; the questions you have came from the ones that worked |
+| ✗ in the run report | That call never reached the model, or came back unusable |
+| `skipped` in the run report | The reply was cut off, so it was retried with a smaller batch |
+
+Common causes, each with specific advice shown in-app:
+
+- **Reply cut off** — the model hit its output limit. The app now retries that
+  chunk automatically with half the batch size; if it still fails, ask for fewer
+  questions or shorten the chunk length under **Context & advanced**. Reasoning
+  models are the usual culprits, because their thinking counts against the
+  output budget.
+- **Out of credit / cap reached** — top up at the provider, or raise the cap in
+  **Admin → Issued API keys**.
+- **Rate limited** — free OpenRouter models have tight limits; wait or switch.
+- **Key rejected** — check it's an inference key for the selected provider, not a
+  management key.
+
 ## Accounts and persistence
 
 ### First run
@@ -467,6 +495,7 @@ lecture-quiz-builder/
 │   ├── appconfig.py              encrypted deployment settings
 │   ├── keymgmt.py                key derivation, purpose subkeys, rotation
 │   ├── audit.py                  security log (never records credentials)
+│   ├── diagnostics.py            per-call run report and failure advice
 │   ├── transcript_import.py      SRT / VTT / timestamped / plain-text import
 │   ├── prompts.py                every prompt, in one editable place
 │   ├── summarize.py              map-reduce summarization
@@ -485,13 +514,14 @@ lecture-quiz-builder/
     ├── test_import_and_counts.py    transcript import, question-count guarantee
     ├── test_accounts_storage_usage.py  crypto, accounts, roles, usage ledger
     ├── test_provisioning.py         issued keys: mint, cap, inspect, revoke
-    └── test_security_hardening.py   crypto, envelope encryption, lockout, audit
+    ├── test_security_hardening.py   crypto, envelope encryption, lockout, audit
+    └── test_failure_reporting.py    truncation, rate limits, silent-failure guards
 ```
 
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 247 tests, no API keys or network needed
+pytest -q          # 273 tests, no API keys or network needed
 ```
 
 ---
