@@ -98,6 +98,31 @@ def physical_memory_gb() -> float | None:
     return (pages * page_size) / GB
 
 
+PROC_STATUS = "/proc/self/status"
+
+
+def process_memory_gb() -> float | None:
+    """How much memory this process is holding right now, in GB.
+
+    Sampled at each checkpoint and recorded against the part, so an interrupted
+    run leaves behind the one number that separates the plausible causes. Memory
+    climbing part over part means a leak or accumulation and the next part was
+    always going to die; memory flat across parts rules memory out entirely and
+    points at time limits, the platform, or the file itself.
+
+    ``None`` on platforms without ``/proc`` (macOS, Windows). Not worth a psutil
+    dependency: the deployments where a run dies unexplained are Linux.
+    """
+    try:
+        with open(PROC_STATUS) as handle:
+            for line in handle:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) * 1024 / GB
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
 def available_memory_gb() -> float | None:
     """The real ceiling: the tighter of the cgroup limit and physical memory.
 

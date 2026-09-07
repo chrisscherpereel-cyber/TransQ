@@ -405,3 +405,77 @@ def test_all_parts_silent_still_raises(parts):
         transcribe_parts(
             DyingWhisper(silent=set(names)), paths, display_names=names
         )
+
+
+# --------------------------------------------------------------------------- #
+# Telemetry — the evidence a silent death leaves behind
+# --------------------------------------------------------------------------- #
+#
+# Once memory was ruled out as the cause of one deployment's failures, the
+# question became "then what?", and there was nothing recorded to answer it.
+# These figures are captured per part so that a run which dies with no error
+# still leaves numbers that discriminate between the remaining explanations.
+
+
+def test_each_part_records_memory_and_timing(parts):
+    names, paths = parts
+    result = transcribe_parts(DyingWhisper(), paths, display_names=names)
+
+    for part in result.parts:
+        assert part.finished_at, "a part with no timestamp cannot be placed in a run"
+        assert part.elapsed_seconds >= 0.0
+
+
+def test_telemetry_survives_the_checkpoint_and_a_reload(parts, library):
+    """Useless unless it outlives the process it describes."""
+    names, paths = parts
+    checkpoints: list[Transcript] = []
+    with pytest.raises(SystemExit):
+        transcribe_parts(
+            DyingWhisper(dies_on=names[2]), paths, display_names=names,
+            on_part_complete=checkpoints.append,
+        )
+
+    entry = library.save(checkpoints[-1], title="Interrupted")
+    reloaded = library.load(entry.id).transcript
+
+    assert len(reloaded.parts) == 2
+    for part in reloaded.parts:
+        assert part.finished_at
+        assert part.elapsed_seconds >= 0.0
+
+
+def test_memory_is_recorded_when_the_platform_reports_it(parts, monkeypatch):
+    import src.transcribe as tr
+
+    monkeypatch.setattr(tr, "process_memory_gb", lambda: 1.25)
+    result = transcribe_parts(DyingWhisper(), parts[1], display_names=parts[0])
+    assert [p.memory_gb for p in result.parts] == [1.25, 1.25, 1.25]
+
+
+def test_an_unreadable_memory_figure_does_not_break_the_run(parts, monkeypatch):
+    """macOS and Windows have no /proc; transcription must not care."""
+    import src.transcribe as tr
+
+    monkeypatch.setattr(tr, "process_memory_gb", lambda: None)
+    result = transcribe_parts(DyingWhisper(), parts[1], display_names=parts[0])
+    assert len(result.parts) == 3
+    assert all(p.memory_gb == 0.0 for p in result.parts)
+
+
+def test_resuming_keeps_the_telemetry_of_the_earlier_parts(parts):
+    """Otherwise finishing a lecture would erase the record of why it broke."""
+    names, paths = parts
+    checkpoints: list[Transcript] = []
+    with pytest.raises(SystemExit):
+        transcribe_parts(
+            DyingWhisper(dies_on=names[2]), paths, display_names=names,
+            on_part_complete=checkpoints.append,
+        )
+    before = [p.finished_at for p in checkpoints[-1].parts]
+
+    resumed = transcribe_parts(
+        DyingWhisper(), paths[2:], display_names=names[2:],
+        resume_from=checkpoints[-1],
+    )
+    assert [p.finished_at for p in resumed.parts[:2]] == before

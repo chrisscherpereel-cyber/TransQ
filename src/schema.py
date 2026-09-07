@@ -49,6 +49,13 @@ class TranscriptPart(BaseModel):
     duration: float
     segments: int = 0
 
+    # Recorded when this part finished, for diagnosing a run that later died
+    # with no error. Memory rising steadily across parts is a different problem
+    # from memory sitting flat, and after a crash these are the only evidence.
+    memory_gb: float = 0.0
+    elapsed_seconds: float = 0.0
+    finished_at: str = ""
+
     @property
     def label(self) -> str:
         return (

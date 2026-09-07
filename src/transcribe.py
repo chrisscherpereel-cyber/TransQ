@@ -10,11 +10,14 @@ pointer back to the moment in the lecture it came from.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import re
+import time
 from collections.abc import Callable
 from typing import Any
 
+from .hostinfo import process_memory_gb
 from .schema import Segment, Transcript, TranscriptPart
 
 ProgressFn = Callable[[float, str], None]
@@ -154,7 +157,13 @@ class TranscriptBuilder:
     def part_index(self) -> int:
         return len(self.parts)
 
-    def add(self, part: Transcript, filename: str, probed_duration: float = 0.0) -> None:
+    def add(
+        self,
+        part: Transcript,
+        filename: str,
+        probed_duration: float = 0.0,
+        elapsed_seconds: float = 0.0,
+    ) -> None:
         index = self.part_index
         for seg in part.segments:
             self.segments.append(
@@ -177,6 +186,11 @@ class TranscriptBuilder:
                 offset=self.offset,
                 duration=measured,
                 segments=len(part.segments),
+                memory_gb=process_memory_gb() or 0.0,
+                elapsed_seconds=elapsed_seconds,
+                finished_at=dt.datetime.now(dt.timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
             )
         )
         self.offset += measured
@@ -269,6 +283,7 @@ def transcribe_parts(
                 overall = min(0.99, (_i + frac) / len(audio_paths))
             progress(overall, f"Transcribing {part_label} — {message}")
 
+        started = time.monotonic()
         try:
             part = transcribe_file(
                 model,
@@ -284,7 +299,7 @@ def transcribe_parts(
             _checkpoint(builder, names[i + 1 :], on_part_complete)
             continue
 
-        builder.add(part, name, part_durations[i])
+        builder.add(part, name, part_durations[i], time.monotonic() - started)
         _checkpoint(builder, names[i + 1 :], on_part_complete)
 
     if not builder.segments:

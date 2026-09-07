@@ -33,7 +33,7 @@ from src.accounts import (
 )
 from src.audit import AuditLog
 from src.diagnostics import PHASE_GENERATE, PHASE_SUMMARY, RunReport
-from src.library import LibraryError, TranscriptLibrary
+from src.library import LibraryEntry, LibraryError, TranscriptLibrary
 from src.appconfig import AppConfig
 from src.config import (
     AUDIO_EXTENSIONS,
@@ -75,7 +75,7 @@ from src.provisioning import (
 from src.schema import OPTION_LETTERS, Quiz, QuizMeta, Summary, Transcript, format_timestamp
 from src.storage import Cipher, StorageError, build_store, dropbox_credentials
 from src.summarize import summarize_transcript
-from src.hostinfo import check_model_fits, describe_host
+from src.hostinfo import available_memory_gb, check_model_fits, describe_host
 from src.transcribe import (
     TranscriptionError,
     estimate_transcription_minutes,
@@ -460,6 +460,68 @@ def storage_status() -> None:
             )
 
 
+def interrupted_run_detail(library: TranscriptLibrary, entry: LibraryEntry) -> None:
+    """Per-part memory and timing for the run that died, with a reading of it.
+
+    The point of recording these is that they discriminate. Memory rising part
+    over part means the next part was always going to fail and the cause is
+    inside the app. Memory flat means the app was healthy when something outside
+    it stopped the process — a platform limit, a redeploy, a dropped connection —
+    and no amount of tuning the model will help.
+    """
+    try:
+        parts = library.load(entry.id).transcript.parts
+    except (LibraryError, StorageError):
+        return
+    if not parts or not any(p.memory_gb for p in parts):
+        st.caption(
+            "This lecture was recorded before per-part telemetry existed, so "
+            "there are no memory or timing figures for it. The next run will "
+            "have them."
+        )
+        return
+
+    st.markdown("**What the parts recorded before it stopped**")
+    st.table(
+        {
+            "Part": [p.filename for p in parts],
+            "Minutes taken": [f"{p.elapsed_seconds / 60:.1f}" for p in parts],
+            "Memory after (GB)": [f"{p.memory_gb:.2f}" for p in parts],
+            "Finished": [p.finished_at.replace("T", " ")[11:19] for p in parts],
+        }
+    )
+
+    memories = [p.memory_gb for p in parts if p.memory_gb]
+    budget = available_memory_gb()
+    if len(memories) >= 2:
+        growth = memories[-1] - memories[0]
+        headroom = f" against {budget:.1f} GB available" if budget else ""
+        if growth > 0.25:
+            st.warning(
+                f"Memory grew {growth:.2f} GB across {len(memories)} parts"
+                f"{headroom}. That trend is the likely cause — the run was going "
+                "to hit the ceiling eventually, and a longer recording would fail "
+                "sooner. Transcribing fewer, shorter parts per run avoids it.",
+                icon="📈",
+            )
+        else:
+            st.info(
+                f"Memory stayed flat (about {memories[-1]:.2f} GB{headroom}), so "
+                "the app was healthy when it stopped. That points away from the "
+                "model and towards something outside the app — a platform time "
+                "limit, a redeploy, or a dropped browser connection. The Streamlit "
+                "Cloud logs (**Manage app → logs**) will name it.",
+                icon="📉",
+            )
+
+    total = sum(p.elapsed_seconds for p in parts)
+    if total:
+        st.caption(
+            f"Total run time before it stopped: {total / 60:.0f} minutes across "
+            f"{len(parts)} parts."
+        )
+
+
 def diagnostics_panel(settings: AppSettings, user: User) -> None:
     """Everything needed to explain a failed run, in one place.
 
@@ -513,6 +575,7 @@ def diagnostics_panel(settings: AppSettings, user: User) -> None:
                 "A run that stops here is where the process died. The part named "
                 "is the one that was being transcribed."
             )
+            interrupted_run_detail(library, unfinished[0])
         elif not durable:
             st.caption(
                 "No interrupted lectures recorded — but with storage on a disk "
