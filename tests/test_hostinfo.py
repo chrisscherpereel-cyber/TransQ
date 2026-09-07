@@ -170,3 +170,30 @@ def test_describe_host_is_a_readable_one_liner(host):
     assert "1.0 GB" in hostinfo.describe_host()
     host(None)
     assert "unknown" in hostinfo.describe_host().lower()
+
+
+# --------------------------------------------------------------------------- #
+# Ephemeral-host detection
+# --------------------------------------------------------------------------- #
+
+
+def test_streamlit_clouds_checkout_directory_is_detected(monkeypatch, tmp_path):
+    marker = tmp_path / "mount" / "src"
+    marker.mkdir(parents=True)
+    monkeypatch.setattr(hostinfo, "STREAMLIT_CLOUD_MARKER", str(marker))
+    assert hostinfo.is_ephemeral_host() is True
+
+
+def test_the_platform_env_vars_are_detected(monkeypatch, tmp_path):
+    monkeypatch.setattr(hostinfo, "STREAMLIT_CLOUD_MARKER", str(tmp_path / "absent"))
+    monkeypatch.setenv("STREAMLIT_SHARING_MODE", "1")
+    assert hostinfo.is_ephemeral_host() is True
+
+
+def test_an_ordinary_machine_is_not_called_ephemeral(monkeypatch, tmp_path):
+    """Conservative by design: only positive evidence counts. A false positive
+    costs the credibility of every warning the app shows."""
+    monkeypatch.setattr(hostinfo, "STREAMLIT_CLOUD_MARKER", str(tmp_path / "absent"))
+    for name in hostinfo.STREAMLIT_CLOUD_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+    assert hostinfo.is_ephemeral_host() is False

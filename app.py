@@ -73,7 +73,7 @@ from src.provisioning import (
     key_name_for,
 )
 from src.schema import OPTION_LETTERS, Quiz, QuizMeta, Summary, Transcript, format_timestamp
-from src.storage import Cipher, StorageError, build_store
+from src.storage import Cipher, StorageError, build_store, dropbox_credentials
 from src.summarize import summarize_transcript
 from src.hostinfo import check_model_fits, describe_host
 from src.transcribe import (
@@ -426,15 +426,101 @@ def storage_status() -> None:
         return
 
     name = getattr(store, "name", "") or "unknown"
+    reason = getattr(store, "fallback_reason", "")
+
     if name == "Dropbox":
         st.caption("💾 Storage: **Dropbox** — survives restarts")
-    elif "local" in name:
-        st.caption(
-            "💾 Storage: **local encrypted files** — wiped when the app restarts "
-            "on Streamlit Cloud. See `docs/DROPBOX.md`."
-        )
+        return
+
+    if "local" in name:
+        st.caption("💾 Storage: **local encrypted files** — wiped on restart")
     else:
         st.caption(f"💾 Storage: **{name}**")
+
+    # The sidebar line used to state the symptom and point at a file. The
+    # question it provokes is "but why?", and the app already knows the answer,
+    # so it should give it here rather than sending anyone to read documentation
+    # about a step they may have completed correctly.
+    if reason:
+        with st.expander("Why isn't this saving?", expanded=False):
+            st.warning(reason, icon="💾")
+            present, missing = dropbox_credentials(
+                {key: get_secret(key) for key in SECRET_KEYS}
+            )
+            if present or missing:
+                st.markdown(
+                    "\n".join(
+                        f"- {'✅' if k in present else '❌'} `{k}`"
+                        for k in (*present, *missing)
+                    )
+                )
+            st.caption(
+                "Names must match exactly, and all three are required. "
+                "On Community Cloud: **Manage app → Settings → Secrets**."
+            )
+
+
+def diagnostics_panel(settings: AppSettings, user: User) -> None:
+    """Everything needed to explain a failed run, in one place.
+
+    Written because two separate reports — "it says local files" and
+    "transcription stops with no message" — turned out to be one situation.
+    Checkpoints are written to storage; if storage is a container disk that the
+    crash itself wipes, the evidence is destroyed by the same event that created
+    it. Neither symptom is diagnosable alone, so they belong on one screen.
+    """
+    with st.expander("🩺 Diagnostics — why did my run fail?"):
+        store = None
+        try:
+            store, _, _, _, _, _ = get_backend()
+        except StorageError as exc:
+            st.error(f"Storage could not start: {exc}")
+
+        durable = getattr(store, "name", "") == "Dropbox"
+        st.markdown(
+            f"**Storage** · {getattr(store, 'name', 'unavailable')} "
+            + ("✅ survives restarts" if durable else "❌ wiped on restart")
+        )
+        reason = getattr(store, "fallback_reason", "")
+        if reason:
+            st.caption(reason)
+
+        st.markdown(f"**This server** · {describe_host()}")
+        verdict = check_model_fits(settings.whisper_model, settings.compute_type)
+        icon = {"ok": "✅", "tight": "⚠️", "refused": "❌"}[verdict.level]
+        st.markdown(
+            f"**Whisper `{settings.whisper_model}`** · {icon} needs about "
+            f"{verdict.needed_gb:.1f} GB"
+        )
+        if verdict.message:
+            st.caption(verdict.message)
+
+        library = get_library(user)
+        unfinished = []
+        if library is not None:
+            try:
+                unfinished = [e for e in library.entries() if not e.is_complete]
+            except (LibraryError, StorageError):
+                pass
+        if unfinished:
+            st.markdown("**Interrupted lectures**")
+            for entry in unfinished:
+                st.markdown(
+                    f"- {entry.title} — {entry.progress_label}, "
+                    f"stopped before `{entry.pending_parts[0]}`"
+                )
+            st.caption(
+                "A run that stops here is where the process died. The part named "
+                "is the one that was being transcribed."
+            )
+        elif not durable:
+            st.caption(
+                "No interrupted lectures recorded — but with storage on a disk "
+                "that a restart wipes, a crashed run erases its own evidence. "
+                "Configure Dropbox and the next failure will leave a trail."
+            )
+        else:
+            st.caption("No interrupted lectures.")
 
 
 def sidebar(directory: UserDirectory, user: User) -> AppSettings:
@@ -2426,6 +2512,7 @@ def main() -> None:
         "ones; anything it drops is replaced, so you still get the count you asked for.",
     )
 
+    diagnostics_panel(settings, user)
     input_section(settings, user, review)
     st.divider()
 

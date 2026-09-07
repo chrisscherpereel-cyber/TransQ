@@ -35,6 +35,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Any
 
+from .hostinfo import is_ephemeral_host
 from .keymgmt import (
     KEYRING_PATH,
     PURPOSE_APIKEYS,
@@ -118,6 +119,10 @@ class Store(ABC):
     """Read and write encrypted documents, plus a plaintext side channel."""
 
     name = "store"
+
+    # Why this backend is in use instead of the one the deployment wanted.
+    # Empty on the backend that was actually asked for.
+    fallback_reason = ""
 
     @abstractmethod
     def read(self, path: str) -> dict[str, Any] | None:
@@ -438,6 +443,7 @@ class GuardedStore(Store):
     def __init__(self, inner: Store):
         self.inner = inner
         self.name = inner.name
+        self.fallback_reason = getattr(inner, "fallback_reason", "")
         self._lock = threading.Lock()
 
     # -- watermarks -- #
@@ -553,32 +559,90 @@ def _bootstrap_backend(secrets: dict[str, str]) -> Store | None:
         return None
 
 
+DROPBOX_KEYS = ("DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN")
+
+
+def dropbox_credentials(secrets: dict[str, str]) -> tuple[list[str], list[str]]:
+    """``(present, missing)`` — which of the three Dropbox values are set.
+
+    Whitespace-only counts as missing, because a secrets file with
+    ``DROPBOX_APP_KEY = ""`` left in as a placeholder is a configuration the user
+    believes is complete.
+    """
+    present = [k for k in DROPBOX_KEYS if (secrets.get(k) or "").strip()]
+    return present, [k for k in DROPBOX_KEYS if k not in present]
+
+
+def _fall_back(cipher: Cipher, data_dir: str, reason: str) -> tuple[Store, str]:
+    """Local files, carrying the reason Dropbox was not used.
+
+    The reason is attached to the store as well as returned, because the warning
+    is shown once at the top of the page and then scrolled past, while the
+    question it answers — "why does the sidebar say local files?" — is asked
+    later, from the sidebar.
+    """
+    store = LocalStore(cipher, data_dir)
+    store.fallback_reason = reason
+    return store, reason
+
+
 def _make_backend(secrets: dict[str, str], cipher: Cipher) -> tuple[Store, str | None]:
-    app_key = secrets.get("DROPBOX_APP_KEY", "")
-    app_secret = secrets.get("DROPBOX_APP_SECRET", "")
-    refresh_token = secrets.get("DROPBOX_REFRESH_TOKEN", "")
     data_dir = secrets.get("DATA_DIR") or ".data"
+    present, missing = dropbox_credentials(secrets)
 
-    if app_key and app_secret and refresh_token:
-        try:
-            store = DropboxStore(
-                cipher, app_key, app_secret, refresh_token,
-                secrets.get("DROPBOX_FOLDER") or "/lecture-quiz-builder",
-            )
-            if store.available():
-                return store, None
-            return LocalStore(cipher, data_dir), (
-                "Dropbox credentials are set but the connection failed — "
-                f"{store.last_error or 'no further detail'} "
-                "Falling back to local files, which do NOT survive a restart on "
-                "Streamlit Cloud."
-            )
-        except StorageError as exc:
-            return LocalStore(cipher, data_dir), (
-                f"Dropbox could not be initialized ({exc}). Falling back to local files."
-            )
+    # Partially configured is the dangerous state, and it used to be silent:
+    # the old check required all three and otherwise said nothing at all, so one
+    # misspelled key name meant an app that looked configured, ran fine, and
+    # threw everything away on the next restart. Say so loudly.
+    if present and missing:
+        return _fall_back(
+            cipher, data_dir,
+            "Dropbox is only half configured — "
+            + ", ".join(missing)
+            + (" is" if len(missing) == 1 else " are")
+            + " missing or empty, so it cannot be used and nothing will survive a "
+            "restart. Check the spelling of the key names in your Streamlit "
+            "secrets; all three are required. See docs/DROPBOX.md.",
+        )
 
-    return LocalStore(cipher, data_dir), None
+    if not present:
+        store, reason = _fall_back(
+            cipher, data_dir,
+            "No Dropbox credentials are set, so everything is stored in local "
+            "files. That is fine on your own machine, but on a host whose disk is "
+            "wiped on restart — Streamlit Community Cloud, most containers — "
+            "accounts, saved lectures and settings will not survive one. "
+            "See docs/DROPBOX.md.",
+        )
+        # Attach the reason either way, so the sidebar can always answer "why
+        # does this say local files?". Only *raise* it to a page-level warning
+        # where it is actually true: on a laptop, local files are the right
+        # answer, and a standing warning there just teaches people to ignore
+        # warnings.
+        return store, (reason if is_ephemeral_host() else None)
+
+    try:
+        store = DropboxStore(
+            cipher, secrets["DROPBOX_APP_KEY"], secrets["DROPBOX_APP_SECRET"],
+            secrets["DROPBOX_REFRESH_TOKEN"],
+            secrets.get("DROPBOX_FOLDER") or "/lecture-quiz-builder",
+        )
+        if store.available():
+            return store, None
+        return _fall_back(
+            cipher, data_dir,
+            "Dropbox credentials are set but the connection failed — "
+            f"{store.last_error or 'no further detail'} "
+            "Falling back to local files, which do NOT survive a restart on "
+            "Streamlit Cloud. Run `python3 scripts/check_dropbox.py` to test the "
+            "credentials directly.",
+        )
+    except StorageError as exc:
+        return _fall_back(
+            cipher, data_dir,
+            f"Dropbox could not be initialized ({exc}). Falling back to local "
+            "files, which do not survive a restart on Streamlit Cloud.",
+        )
 
 
 # Backwards-compatible name: earlier versions imported this from here.

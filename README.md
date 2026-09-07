@@ -592,7 +592,7 @@ lecture-quiz-builder/
 `scripts/check_dropbox.py` verifies Dropbox end to end before you rely on it.
 
 ```bash
-pytest -q          # 349 tests, no API keys or network needed
+pytest -q          # 361 tests, no API keys or network needed
 ```
 
 ---

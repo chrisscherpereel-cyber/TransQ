@@ -197,6 +197,30 @@ def check_model_fits(model_size: str, compute_type: str = "int8") -> MemoryVerdi
     return MemoryVerdict("ok", "", budget, needed, "")
 
 
+# Community Cloud checks the repo out here. It is the most reliable signal
+# available, and it is what the platform's own docs describe.
+STREAMLIT_CLOUD_MARKER = "/mount/src"
+
+STREAMLIT_CLOUD_ENV_VARS = ("STREAMLIT_SHARING_MODE", "STREAMLIT_RUNTIME_ENV")
+
+
+def is_ephemeral_host() -> bool:
+    """Is this a host whose disk disappears on restart?
+
+    Used to decide how loudly to complain about local-file storage. On a laptop,
+    local files are exactly right and a standing warning is noise that teaches
+    people to ignore warnings. On Community Cloud the same configuration quietly
+    destroys a semester of work.
+
+    Deliberately conservative: only positive evidence of an ephemeral host counts.
+    Being wrong in the quiet direction costs a warning; being wrong in the loud
+    direction costs the credibility of every warning the app shows.
+    """
+    if os.path.isdir(STREAMLIT_CLOUD_MARKER):
+        return True
+    return any(os.environ.get(name) for name in STREAMLIT_CLOUD_ENV_VARS)
+
+
 def describe_host() -> str:
     """A one-line summary for the sidebar."""
     budget = available_memory_gb()

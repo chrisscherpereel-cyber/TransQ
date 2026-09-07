@@ -220,3 +220,115 @@ def test_an_unreachable_dropbox_raises_storage_error_not_a_dropbox_exception(sto
     store._client.files_download = boom
     with pytest.raises(StorageError):
         store.read("users/index")
+
+
+# --------------------------------------------------------------------------- #
+# Choosing a backend, and saying why
+# --------------------------------------------------------------------------- #
+#
+# The reported symptom: a sidebar reading "local encrypted files" on a
+# deployment the user believed was configured for Dropbox. The old selection
+# logic required all three credentials and, if any were absent, fell through to
+# local files returning **no warning at all** — so a single misspelled key name
+# produced an app that looked healthy and threw everything away on restart.
+
+
+from src.storage import build_store, dropbox_credentials  # noqa: E402
+
+FULL = {
+    "DROPBOX_APP_KEY": "k",
+    "DROPBOX_APP_SECRET": "s",
+    "DROPBOX_REFRESH_TOKEN": "r",
+}
+
+
+def base_secrets(tmp_path, **extra):
+    return {"APP_SECRET": SECRET, "DATA_DIR": str(tmp_path), **extra}
+
+
+def test_credentials_are_counted_as_present_or_missing():
+    present, missing = dropbox_credentials(FULL)
+    assert present == list(FULL) and missing == []
+
+    present, missing = dropbox_credentials({"DROPBOX_APP_KEY": "k"})
+    assert present == ["DROPBOX_APP_KEY"]
+    assert "DROPBOX_REFRESH_TOKEN" in missing
+
+
+def test_a_blank_placeholder_counts_as_missing():
+    """`DROPBOX_APP_KEY = ""` left in a secrets file is not configuration."""
+    _, missing = dropbox_credentials({**FULL, "DROPBOX_APP_SECRET": "   "})
+    assert missing == ["DROPBOX_APP_SECRET"]
+
+
+def test_half_configured_dropbox_warns_and_names_what_is_missing(tmp_path):
+    """The silent case that motivated this: some credentials, no complaint."""
+    store, warning = build_store(
+        base_secrets(tmp_path, DROPBOX_APP_KEY="k", DROPBOX_APP_SECRET="s")
+    )
+    assert warning is not None
+    assert "DROPBOX_REFRESH_TOKEN" in warning
+    assert "local" in store.name
+
+
+def test_half_configured_warns_on_a_laptop_too(tmp_path, monkeypatch):
+    """Unlike plain local storage, partial credentials are a mistake anywhere."""
+    import src.storage as storage
+
+    monkeypatch.setattr(storage, "is_ephemeral_host", lambda: False)
+    _, warning = build_store(base_secrets(tmp_path, DROPBOX_APP_KEY="k"))
+    assert warning is not None
+
+
+def test_no_credentials_is_quiet_on_a_laptop(tmp_path, monkeypatch):
+    """Local files are the right answer on a machine you control; a standing
+    warning there only teaches people to ignore warnings."""
+    import src.storage as storage
+
+    monkeypatch.setattr(storage, "is_ephemeral_host", lambda: False)
+    store, warning = build_store(base_secrets(tmp_path))
+    assert warning is None
+    assert store.fallback_reason, "the reason is still available on request"
+
+
+def test_no_credentials_warns_loudly_on_an_ephemeral_host(tmp_path, monkeypatch):
+    import src.storage as storage
+
+    monkeypatch.setattr(storage, "is_ephemeral_host", lambda: True)
+    _, warning = build_store(base_secrets(tmp_path))
+    assert warning is not None
+    assert "restart" in warning
+
+
+def test_a_failed_connection_reports_the_reason_and_how_to_test_it(
+    tmp_path, monkeypatch
+):
+    install_stub_sdk(monkeypatch)
+    monkeypatch.setattr(
+        StubClient,
+        "files_list_folder",
+        lambda self, p, **kw: (_ for _ in ()).throw(
+            StubApiError("missing_scope/files.content.write")
+        ),
+    )
+    store, warning = build_store(base_secrets(tmp_path, **FULL))
+
+    assert "local" in store.name
+    assert "check_dropbox" in warning
+    assert "Submit" in warning, "the actual fix, not just 'connection failed'"
+
+
+def test_a_working_dropbox_produces_no_warning_and_no_reason(tmp_path, monkeypatch):
+    install_stub_sdk(monkeypatch)
+    store, warning = build_store(base_secrets(tmp_path, **FULL))
+
+    assert store.name == "Dropbox"
+    assert warning is None
+    assert not store.fallback_reason
+
+
+def test_the_fallback_reason_survives_the_guarded_wrapper(tmp_path):
+    """build_store returns a GuardedStore; the sidebar reads the reason off it."""
+    store, _ = build_store(base_secrets(tmp_path, DROPBOX_APP_KEY="k"))
+    assert type(store).__name__ == "GuardedStore"
+    assert "DROPBOX_APP_SECRET" in store.fallback_reason
