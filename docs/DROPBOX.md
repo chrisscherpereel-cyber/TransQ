@@ -24,6 +24,27 @@ That also means the two secrets do different jobs and are not interchangeable:
 
 ---
 
+## The short way
+
+Steps 3–5 below — copying the app key, hand-building an authorize URL, and
+running a `curl` command against a code that expires in minutes — are where this
+usually goes wrong. A script does them for you:
+
+```bash
+python3 scripts/setup_dropbox.py
+```
+
+It walks you through the App Console prerequisites, opens the authorize page,
+takes the code, exchanges it, checks that all four permissions actually came
+back, and prints a finished secrets block to paste. Do **Step 1** and **Step 2**
+first — the script cannot tick permissions for you, and a token generated before
+you press Submit is the single most common failure.
+
+The rest of this document explains each step by hand, for when you want to know
+what the script is doing or something has gone wrong.
+
+---
+
 ## Step 1 — Create the Dropbox app
 
 1. Sign in at [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps)

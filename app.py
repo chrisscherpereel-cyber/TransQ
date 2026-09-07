@@ -76,6 +76,7 @@ from src.schema import OPTION_LETTERS, Quiz, QuizMeta, Summary, Transcript, form
 from src.storage import (
     DROPBOX_KEYS,
     Cipher,
+    DropboxStore,
     StorageError,
     build_store,
     dropbox_credentials,
@@ -550,6 +551,71 @@ def interrupted_run_detail(library: TranscriptLibrary, entry: LibraryEntry) -> N
         )
 
 
+def dropbox_live_probe() -> None:
+    """Ask Dropbox, right now, and print exactly what it says.
+
+    Everything else on this panel reports state captured when the app started
+    and carried through several objects. That is one plumbing bug away from
+    telling you nothing, which is precisely what happened: a deployment fell
+    back to local files and the recorded explanation arrived empty, leaving the
+    panel confidently silent about the only question that mattered.
+
+    So this path is deliberately independent. It builds a client from the
+    current secrets, makes a real call, and shows the raw result — no caching,
+    no stored state, nothing to go stale between here and the failure.
+    """
+    if not st.button("🔌 Test the Dropbox connection now", use_container_width=True):
+        return
+
+    secrets = {key: get_secret(key) for key in SECRET_KEYS}
+    present, missing = dropbox_credentials(secrets)
+    if missing:
+        st.error("Cannot test — missing: " + ", ".join(missing))
+        return
+
+    try:
+        import dropbox  # noqa: F401
+    except ImportError:
+        st.error(
+            "The `dropbox` package is not installed on this server, so the app "
+            "cannot use Dropbox no matter how good the credentials are. It is "
+            "listed in requirements.txt — if this is Streamlit Cloud, the "
+            "install failed and the build logs will say why.",
+            icon="📦",
+        )
+        return
+
+    with st.spinner("Calling Dropbox…"):
+        try:
+            probe = DropboxStore(
+                Cipher.__new__(Cipher),  # no crypto needed to test reachability
+                secrets["DROPBOX_APP_KEY"].strip(),
+                secrets["DROPBOX_APP_SECRET"].strip(),
+                secrets["DROPBOX_REFRESH_TOKEN"].strip(),
+                secrets.get("DROPBOX_FOLDER") or "/lecture-quiz-builder",
+            )
+            ok = probe.available()
+        except Exception as exc:  # noqa: BLE001 - the raw text is the point
+            st.error(f"The connection attempt raised: {exc}")
+            return
+
+    if ok:
+        st.success(
+            "Dropbox answered. The credentials are good — restart the app "
+            "(**Manage app → Reboot**) and storage should switch over.",
+            icon="✅",
+        )
+        return
+
+    st.error(f"Dropbox refused: {probe.last_error or 'no detail returned'}", icon="🔌")
+    st.caption(
+        "That text comes straight from Dropbox. If it mentions a missing "
+        "permission, the token was issued before the four scopes were submitted "
+        "and must be regenerated — `python3 scripts/setup_dropbox.py` checks the "
+        "scopes as it goes."
+    )
+
+
 def diagnostics_panel(settings: AppSettings, user: User) -> None:
     """Everything needed to explain a failed run, in one place.
 
@@ -576,6 +642,7 @@ def diagnostics_panel(settings: AppSettings, user: User) -> None:
             if reason:
                 st.caption(reason)
             dropbox_credential_checklist()
+            dropbox_live_probe()
 
         st.markdown(f"**This server** · {describe_host()}")
         verdict = check_model_fits(settings.whisper_model, settings.compute_type)

@@ -466,9 +466,14 @@ Without `APP_SECRET` the app still runs, but nothing is saved and it says so.
 | **Encrypted local files** (default) | A machine you control, or local development | ❌ — the container disk is wiped |
 | **Dropbox app folder** | A shared deployment on Streamlit Cloud | ✅ |
 
-Dropbox wins automatically when all three of its credentials are present. The
-full walkthrough — with the ordering gotcha that catches most people — is
-**[docs/DROPBOX.md](docs/DROPBOX.md)**. The short version:
+Dropbox wins automatically when all three of its credentials are present.
+
+**The quickest route:** create the app and tick its four permissions in the
+Dropbox App Console (steps 1–2 below), then run
+`python3 scripts/setup_dropbox.py` — it does the authorization and token
+exchange and prints a finished secrets block to paste. The full walkthrough,
+with the ordering gotcha that catches most people, is
+**[docs/DROPBOX.md](docs/DROPBOX.md)**. By hand:
 
 1. [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps) →
    **Create app** → Scoped access → **App folder** → name it.
@@ -575,6 +580,7 @@ lecture-quiz-builder/
 │   └── DROPBOX.md                step-by-step encrypted-storage setup
 ├── scripts/
 │   ├── rotate_key.py             re-encrypt everything under a new APP_SECRET
+│   ├── setup_dropbox.py          interactive OAuth: prints a secrets block
 │   └── check_dropbox.py          preflight: full encrypted round trip to Dropbox
 └── tests/
     ├── test_pipeline.py             schema, validation, balancing, all exporters
@@ -592,8 +598,9 @@ lecture-quiz-builder/
     └── test_hostinfo.py             memory detection and the model-fit verdicts
 ```
 
-`scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`;
-`scripts/check_dropbox.py` verifies Dropbox end to end before you rely on it.
+`scripts/setup_dropbox.py` walks through Dropbox authorization;
+`scripts/check_dropbox.py` verifies it end to end before you rely on it;
+`scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
 pytest -q          # 372 tests, no API keys or network needed
