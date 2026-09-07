@@ -42,6 +42,7 @@ part 3 ─┘    (sequential)       (one timeline)         │
 | **Export** | QTI 1.2 (Canvas) · QTI 2.1 · XLSX · CSV · DOCX · PDF · Markdown · SRT/VTT captions |
 | **Accounts** | Sign-in with lockout and idle timeout, admin-created users, per-account settings, and personal API keys encrypted so only that user can read them |
 | **Issued keys** | Mint a capped, revocable OpenRouter key per person — no collecting personal credentials |
+| **Save** | Every lecture is stored to your account automatically — transcript, summary and question sets — and reopens where you left off |
 | **Track** | Tokens and estimated cost, live during a run and cumulative per account |
 
 Every generated question is a **draft for your review**, not a finished exam item.
@@ -103,10 +104,19 @@ automatically.
 The free tier gives you **1 CPU core and about 1 GB of RAM**. That has real
 consequences:
 
-- **Use the `small` Whisper model or below.** `medium` and `large-v3` will
-  exhaust memory and the app will restart mid-transcription.
+- **Use the `small` Whisper model or below.** `medium` and `large-v3` exhaust
+  memory and the container is killed mid-transcription. The app now measures the
+  host's actual memory limit (cgroup-aware, so a container on a large machine is
+  not fooled by the host's total) and refuses a model that cannot fit, naming one
+  that can. `small` on 1 GB is flagged as tight rather than refused: it usually
+  works, and blocking it would remove a setup people rely on.
 - **Transcription is roughly 0.35× real time on `small`** — a 50-minute lecture
   takes about 18 minutes. The app shows an estimate before it starts.
+- **A split recording is checkpointed part by part.** Each part is saved to your
+  library the moment it finishes, and reopening the app offers to transcribe only
+  the parts that are missing. An interruption costs one part, not the lecture.
+  This matters because a killed container raises no exception — there is nothing
+  to catch, so anything not already written down is gone.
 - **Apps sleep after inactivity** and cold-start by re-downloading the model.
   Expect a slow first request after idle time.
 - **Uploads are capped at 400 MB** by `.streamlit/config.toml`. A 90-minute MP3
@@ -197,8 +207,20 @@ from part three is tagged `52:14` of the lecture, not `2:14` of the third file,
 and the summarizer's 10-minute windows straddle part boundaries exactly as they
 would in a single file.
 
-Two things to know:
+Three things to know:
 
+- **Every finished part is saved before the next one starts.** If the run is
+  interrupted — a container killed for memory, a deploy, a restart — the parts
+  already done are in your library. Reopen the app and it offers to finish the
+  lecture: upload only the missing parts and they are appended to the saved
+  timeline, so timestamps stay correct across the join and nothing is transcribed
+  twice. You can also choose **Keep what I have** and work from a partial lecture.
+
+  This is deliberate rather than incidental. A container that exceeds its memory
+  limit is killed outright: no exception is raised, so no error handler runs and
+  nothing gets a chance to save on the way down. Only what was already written to
+  storage survives, which is why the checkpoint has to happen after each part
+  rather than at the end.
 - **Split on a clean boundary, without overlap.** If parts overlap, the
   overlapping speech is transcribed twice. The near-duplicate check will flag
   questions that result, but trimming the overlap first is better.
@@ -279,6 +301,31 @@ Use the QTI 2.1 export only if your LMS specifically demands 2.1 — Canvas
 handles the 1.2 package more reliably.
 
 ---
+
+## Your saved lectures
+
+Transcription is the slow step, so nothing relies on you remembering to save. A
+lecture is written to your account the moment it is transcribed or imported, and
+the same entry is updated when you generate a summary and questions.
+
+The **📚 Library** tab lists what you have: length, word count, whether it has a
+summary, and how many question sets. **Open this lecture** restores the whole
+working state — transcript, summary, and every set — so you can export or
+regenerate without paying for any of it again. You can rename and delete entries
+there too.
+
+Two things worth knowing:
+
+- **On Streamlit Community Cloud, configure Dropbox.** Local files are wiped on
+  every restart, so without it the library empties itself periodically. The
+  Library tab warns when storage is not durable.
+- **Lectures are encrypted at rest under the app key**, like everything else in
+  the store — *not* sealed to your password the way personal API keys are. That
+  is deliberate: a key is trivially re-entered, a semester of transcripts is not,
+  and an admin password reset would otherwise destroy them. If your deployment
+  needs transcripts unreadable without the user present — recordings of class
+  discussion, say — `src/library.py` documents the one-line change, and the
+  trade it makes.
 
 ## When a run doesn't finish
 
@@ -415,16 +462,23 @@ Without `APP_SECRET` the app still runs, but nothing is saved and it says so.
 | **Encrypted local files** (default) | A machine you control, or local development | ❌ — the container disk is wiped |
 | **Dropbox app folder** | A shared deployment on Streamlit Cloud | ✅ |
 
-Dropbox wins automatically when its credentials are present. To get them:
+Dropbox wins automatically when all three of its credentials are present. The
+full walkthrough — with the ordering gotcha that catches most people — is
+**[docs/DROPBOX.md](docs/DROPBOX.md)**. The short version:
 
 1. [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps) →
    **Create app** → Scoped access → **App folder** → name it.
-2. Under **Permissions**, tick `files.content.read` and `files.content.write`,
-   then **Submit**.
+2. Under **Permissions**, tick `files.metadata.read`, `files.metadata.write`,
+   `files.content.read` and `files.content.write`, then press **Submit**.
+   Do this *before* step 3 — a token keeps whatever scopes it was issued with,
+   so ticking permissions afterwards does not upgrade it.
 3. Visit, with your app key substituted in:
    `https://www.dropbox.com/oauth2/authorize?client_id=APP_KEY&response_type=code&token_access_type=offline`
-   Approve, and copy the authorization code.
-4. Exchange it for a refresh token:
+   Approve, and copy the authorization code. (`token_access_type=offline` is what
+   makes Dropbox return a long-lived refresh token instead of one that dies in
+   four hours.)
+4. Exchange it for a refresh token — the code is single-use and expires in
+   minutes, so do this immediately:
 
    ```bash
    curl -u APP_KEY:APP_SECRET https://api.dropboxapi.com/oauth2/token \
@@ -432,7 +486,12 @@ Dropbox wins automatically when its credentials are present. To get them:
    ```
 
 5. Put `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET` and the `refresh_token` from that
-   response into your secrets.
+   response into your secrets, alongside `APP_SECRET`.
+6. **Verify it, rather than assuming:** `python3 scripts/check_dropbox.py`. Bad
+   credentials do not crash the app — it falls back to local files, which look
+   identical until a restart wipes them. The checker does a full encrypted
+   round trip and names the step that failed. The sidebar also reports the
+   live backend.
 
 **An honest note on Dropbox.** It is file storage, not a database — no
 transactions, no row locking. Two people saving at the same instant means one
@@ -489,6 +548,7 @@ lecture-quiz-builder/
 │   ├── llm.py                    five-provider abstraction, retries, cost
 │   ├── openrouter_catalog.py     live model list: fetch, filter, sort, free flags
 │   ├── storage.py                encrypted Store: local files and Dropbox
+│   ├── hostinfo.py               memory ceiling detection and the model guard
 │   ├── accounts.py               users, roles, scrypt passwords, saved keys
 │   ├── usage.py                  live meter and the persistent usage ledger
 │   ├── provisioning.py           issue/cap/revoke per-user OpenRouter keys
@@ -496,6 +556,7 @@ lecture-quiz-builder/
 │   ├── keymgmt.py                key derivation, purpose subkeys, rotation
 │   ├── audit.py                  security log (never records credentials)
 │   ├── diagnostics.py            per-call run report and failure advice
+│   ├── library.py                saved lectures per account
 │   ├── transcript_import.py      SRT / VTT / timestamped / plain-text import
 │   ├── prompts.py                every prompt, in one editable place
 │   ├── summarize.py              map-reduce summarization
@@ -506,6 +567,11 @@ lecture-quiz-builder/
 │       ├── tabular.py            CSV, XLSX
 │       ├── documents.py          DOCX, PDF, Markdown
 │       └── transcript_formats.py TXT, SRT, WebVTT
+├── docs/
+│   └── DROPBOX.md                step-by-step encrypted-storage setup
+├── scripts/
+│   ├── rotate_key.py             re-encrypt everything under a new APP_SECRET
+│   └── check_dropbox.py          preflight: full encrypted round trip to Dropbox
 └── tests/
     ├── test_pipeline.py             schema, validation, balancing, all exporters
     ├── test_llm_clients.py          provider wiring, against stubbed SDKs
@@ -515,13 +581,18 @@ lecture-quiz-builder/
     ├── test_accounts_storage_usage.py  crypto, accounts, roles, usage ledger
     ├── test_provisioning.py         issued keys: mint, cap, inspect, revoke
     ├── test_security_hardening.py   crypto, envelope encryption, lockout, audit
-    └── test_failure_reporting.py    truncation, rate limits, silent-failure guards
+    ├── test_failure_reporting.py    truncation, rate limits, silent-failure guards
+    ├── test_library.py              save/load round-trips, per-account isolation
+    ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
+    ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
+    └── test_hostinfo.py             memory detection and the model-fit verdicts
 ```
 
-`scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
+`scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`;
+`scripts/check_dropbox.py` verifies Dropbox end to end before you rely on it.
 
 ```bash
-pytest -q          # 273 tests, no API keys or network needed
+pytest -q          # 349 tests, no API keys or network needed
 ```
 
 ---

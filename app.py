@@ -33,6 +33,7 @@ from src.accounts import (
 )
 from src.audit import AuditLog
 from src.diagnostics import PHASE_GENERATE, PHASE_SUMMARY, RunReport
+from src.library import LibraryError, TranscriptLibrary
 from src.appconfig import AppConfig
 from src.config import (
     AUDIO_EXTENSIONS,
@@ -59,6 +60,7 @@ from src.exporters.transcript_formats import (
     export_vtt,
 )
 from src.llm import LLMClient, LLMError, PRICING, register_pricing
+from src.chunking import chunk_transcript
 from src.mcq import coverage_report, generate_replacement, generate_question_set, validate_all
 from src.openrouter_catalog import ORModel, load_models, pricing_map, vendors
 from src.provisioning import (
@@ -73,6 +75,7 @@ from src.provisioning import (
 from src.schema import OPTION_LETTERS, Quiz, QuizMeta, Summary, Transcript, format_timestamp
 from src.storage import Cipher, StorageError, build_store
 from src.summarize import summarize_transcript
+from src.hostinfo import check_model_fits, describe_host
 from src.transcribe import (
     TranscriptionError,
     estimate_transcription_minutes,
@@ -161,6 +164,7 @@ def init_state() -> None:
         "chunks": [],
         "generation_notes": [],
         "run_report": None,
+        "library_id": None,
         "source_filename": "",
         "catalog_nonce": 0,
         "user": None,
@@ -407,11 +411,38 @@ def openrouter_model_picker(default_slug: str) -> str:
     return custom or selected
 
 
+def storage_status() -> None:
+    """Say which backend is live, in the sidebar, always.
+
+    A misconfigured Dropbox does not crash the app — it falls back to local
+    files, which behave identically until a restart wipes them. That is the
+    right runtime behaviour and a terrible way to find out, so the answer to
+    "is my data actually going somewhere durable?" is on screen rather than
+    inferred from the absence of a warning.
+    """
+    try:
+        store, _, _, _, _, _ = get_backend()
+    except StorageError:
+        return
+
+    name = getattr(store, "name", "") or "unknown"
+    if name == "Dropbox":
+        st.caption("💾 Storage: **Dropbox** — survives restarts")
+    elif "local" in name:
+        st.caption(
+            "💾 Storage: **local encrypted files** — wiped when the app restarts "
+            "on Streamlit Cloud. See `docs/DROPBOX.md`."
+        )
+    else:
+        st.caption(f"💾 Storage: **{name}**")
+
+
 def sidebar(directory: UserDirectory, user: User) -> AppSettings:
     s = AppSettings()
     with st.sidebar:
         st.markdown(f"### 👤 {user.label}")
         st.caption(f"{user.role.title()} · signed in")
+        storage_status()
 
         with st.expander("Transcription", expanded=False):
             whisper_default = preference(user, "whisper_model", "small")
@@ -423,6 +454,17 @@ def sidebar(directory: UserDirectory, user: User) -> AppSettings:
                 help="Ignored when you import a transcript instead of audio.",
             )
             st.caption(WHISPER_MODELS[s.whisper_model])
+            st.caption(f"This server: {describe_host()}")
+
+            # Say it here, at the moment of choosing, as well as at run time.
+            # Finding out that a model does not fit after uploading 80 MB of
+            # audio and waiting ten minutes is the failure this replaces.
+            verdict = check_model_fits(s.whisper_model, s.compute_type)
+            if verdict.level == "refused":
+                st.error(verdict.message, icon="🧠")
+            elif verdict.level == "tight":
+                st.warning(verdict.message, icon="🧠")
+
             languages = ["Auto-detect", "en", "es", "fr", "de", "zh", "hi", "pt"]
             lang = st.selectbox("Language", languages, index=0)
             s.language = None if lang == "Auto-detect" else lang
@@ -752,6 +794,62 @@ def order_uploads(files: list, use_upload_order: bool) -> list:
     return sorted(files, key=lambda f: natural_sort_key(f.name))
 
 
+def get_library(user: User) -> TranscriptLibrary | None:
+    """This account's saved lectures, or None if nothing can be saved."""
+    try:
+        store, _, _, _, _, _ = get_backend()
+        return TranscriptLibrary(store, user.username)
+    except (StorageError, LibraryError):
+        return None
+
+
+def autosave_transcript(user: User, origin: str) -> None:
+    """Persist the lecture the moment it exists.
+
+    Transcription is the expensive step; losing it to a browser refresh is the
+    kind of thing that makes people stop using a tool. Saving happens without
+    being asked, and the entry is updated in place as the summary and question
+    sets arrive.
+    """
+    library = get_library(user)
+    transcript = st.session_state.transcript
+    if library is None or transcript is None:
+        return
+    try:
+        entry = library.save(
+            transcript,
+            title=st.session_state.get("source_filename", ""),
+            origin=origin,
+            # Update the entry the per-part checkpoints already created, rather
+            # than filing a second copy of the same lecture beside it.
+            entry_id=st.session_state.get("library_id"),
+        )
+        st.session_state.library_id = entry.id
+        st.caption(f"Saved to your library as **{entry.title}**.")
+    except (LibraryError, StorageError) as exc:
+        st.warning(
+            f"The transcript could not be saved to your library: {exc}", icon="💾"
+        )
+
+
+def update_saved_lecture(user: User) -> None:
+    """Fold the summary and question sets into the saved entry."""
+    library = get_library(user)
+    transcript = st.session_state.transcript
+    if library is None or transcript is None:
+        return
+    try:
+        entry = library.save(
+            transcript,
+            summary=st.session_state.summary,
+            quizzes=list(st.session_state.quiz_versions),
+            entry_id=st.session_state.get("library_id"),
+        )
+        st.session_state.library_id = entry.id
+    except (LibraryError, StorageError) as exc:
+        st.warning(f"Your library entry was not updated: {exc}", icon="💾")
+
+
 def reset_downstream() -> None:
     st.session_state.summary = None
     st.session_state.quiz = None
@@ -761,8 +859,49 @@ def reset_downstream() -> None:
     st.session_state.generation_notes = []
 
 
-def run_transcription(uploaded: list, settings: AppSettings) -> None:
+def checkpoint_saver(user: User, origin: str):
+    """A callback that writes each finished part straight to the library.
+
+    This is the fix for the failure that motivated it: a container killed on the
+    last part of a split recording used to discard every part before it, because
+    the only copy lived in a local list. Now each part is durable the moment it
+    exists, and the entry is updated in place rather than duplicated.
+
+    Deliberately silent. It runs mid-run, several times, and a stream of toasts
+    would bury the progress bar. It is also best-effort — ``_checkpoint`` in
+    :mod:`src.transcribe` swallows what this raises, because storage being
+    briefly unavailable is a reason to keep transcribing, not to stop.
+    """
+    library = get_library(user)
+    if library is None:
+        return None
+
+    def save(partial: Transcript) -> None:
+        entry = library.save(
+            partial,
+            title=st.session_state.get("source_filename", ""),
+            origin=origin,
+            entry_id=st.session_state.get("library_id"),
+        )
+        st.session_state.library_id = entry.id
+
+    return save
+
+
+def run_transcription(
+    uploaded: list,
+    settings: AppSettings,
+    user: User,
+    resume_from: Transcript | None = None,
+) -> None:
     """Transcribe one file, or several parts of a split recording, in order."""
+    verdict = check_model_fits(settings.whisper_model, settings.compute_type)
+    if not verdict.allowed:
+        st.error(verdict.message, icon="🧠")
+        return
+    if verdict.level == "tight":
+        st.warning(verdict.message, icon="🧠")
+
     paths: list[str] = []
     names: list[str] = []
 
@@ -773,6 +912,14 @@ def run_transcription(uploaded: list, settings: AppSettings) -> None:
             paths.append(tmp.name)
             names.append(item.name)
 
+    # Set the title before transcribing, so the first checkpoint is already
+    # filed under a recognisable name rather than "Lecture (25:00)".
+    if resume_from is None:
+        st.session_state.library_id = None
+        st.session_state.source_filename = (
+            names[0] if len(names) == 1 else f"{os.path.splitext(names[0])[0]}_combined"
+        )
+
     try:
         durations = [probe_duration(p) for p in paths]
         total = sum(durations)
@@ -782,6 +929,11 @@ def run_transcription(uploaded: list, settings: AppSettings) -> None:
             st.info(
                 f"{len(paths)} {noun} · combined length {format_timestamp(total)} · "
                 f"estimated transcription time ~{est:.1f} min on this server."
+            )
+        if len(paths) > 1:
+            st.caption(
+                "Each part is saved to your library as it finishes, so an "
+                "interruption costs you one part rather than the whole lecture."
             )
 
         bar = st.progress(0.0, text="Loading the Whisper model…")
@@ -794,15 +946,14 @@ def run_transcription(uploaded: list, settings: AppSettings) -> None:
             vad_filter=settings.vad_filter,
             beam_size=settings.beam_size,
             progress=lambda f, m: bar.progress(min(1.0, f), text=m),
+            on_part_complete=checkpoint_saver(user, origin="audio"),
+            resume_from=resume_from,
         )
         bar.empty()
 
         st.session_state.transcript = transcript
         st.session_state.transcript_note = ""
         reset_downstream()
-        st.session_state.source_filename = (
-            names[0] if len(names) == 1 else f"{os.path.splitext(names[0])[0]}_combined"
-        )
         st.success(
             f"Transcribed {format_timestamp(transcript.duration)} of audio across "
             f"{len(transcript.parts)} part(s) — {transcript.word_count:,} words, "
@@ -814,6 +965,7 @@ def run_transcription(uploaded: list, settings: AppSettings) -> None:
                 + "\n".join(f"- {s}" for s in transcript.skipped_parts),
                 icon="⚠️",
             )
+        autosave_transcript(user, origin="audio")
     except TranscriptionError as exc:
         st.error(str(exc))
     finally:
@@ -824,7 +976,7 @@ def run_transcription(uploaded: list, settings: AppSettings) -> None:
                 pass
 
 
-def run_transcript_import(uploaded) -> None:
+def run_transcript_import(uploaded, user: User) -> None:
     """Load a transcript that already exists, skipping Whisper entirely."""
     try:
         raw = uploaded.getvalue()
@@ -837,6 +989,7 @@ def run_transcript_import(uploaded) -> None:
     st.session_state.transcript = transcript
     st.session_state.transcript_note = described
     reset_downstream()
+    st.session_state.library_id = None  # a new lecture, not an update to the last
     st.session_state.source_filename = uploaded.name
 
     st.success(
@@ -851,6 +1004,7 @@ def run_transcript_import(uploaded) -> None:
             "but treat it as approximate rather than a place to scrub to.",
             icon="🕒",
         )
+    autosave_transcript(user, origin=described)
 
 
 def build_client(settings: AppSettings) -> LLMClient | None:
@@ -954,6 +1108,7 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
         )
         st.session_state.generation_notes = notes
         store_version(build_quiz(questions, summary, settings, version=1))
+        update_saved_lecture(user)
         bar.empty()
         report_outcome(report, questions, notes, settings)
     except LLMError as exc:
@@ -1058,6 +1213,7 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
                 questions, summary, settings, version=len(st.session_state.quiz_versions) + 1
             )
         )
+        update_saved_lecture(user)
         st.toast(
             f"Added Set {len(st.session_state.quiz_versions)} — "
             f"{len([q for q in questions if q.include])} new questions.",
@@ -1127,7 +1283,108 @@ def run_replacement(
 # --------------------------------------------------------------------------- #
 
 
+def resume_panel(settings: AppSettings, user: User) -> bool:
+    """Offer to finish a lecture that was interrupted partway through.
+
+    Shown before anything else, because a half-transcribed lecture sitting in
+    the library is the most likely reason someone reopened the app. Re-uploading
+    the remaining parts costs only the parts that were never done.
+
+    Returns True when it rendered, so the caller can put a divider under it.
+    """
+    library = get_library(user)
+    if library is None:
+        return False
+    try:
+        unfinished = [e for e in library.entries() if not e.is_complete]
+    except (LibraryError, StorageError):
+        return False
+    if not unfinished:
+        return False
+
+    entry = unfinished[0]
+    with st.container(border=True):
+        st.markdown(f"### ⏸️ Unfinished: {entry.title}")
+        st.caption(
+            f"{entry.progress_label} · {entry.length_label} saved so far. "
+            "The parts already done are safe in your library."
+        )
+        st.markdown(
+            "**Still to transcribe:** "
+            + ", ".join(f"`{name}`" for name in entry.pending_parts)
+        )
+
+        uploads = st.file_uploader(
+            "Upload the remaining part(s) to finish this lecture",
+            type=AUDIO_EXTENSIONS,
+            accept_multiple_files=True,
+            key=f"resume_{entry.id}",
+            help="Only the parts listed above. They are appended to the saved "
+            "timeline, so timestamps stay correct across the whole lecture.",
+        )
+        ordered = order_uploads(uploads, use_upload_order=False) if uploads else []
+
+        # Names rarely match exactly — people re-export or rename. Warn, but do
+        # not block: the user knows which file is which better than we do.
+        if ordered:
+            unexpected = [
+                f.name for f in ordered if f.name not in entry.pending_parts
+            ]
+            if unexpected:
+                st.warning(
+                    "These do not match the expected filenames: "
+                    + ", ".join(f"`{n}`" for n in unexpected)
+                    + ". They will be appended in the order shown — check that is "
+                    "the right order before continuing.",
+                    icon="⚠️",
+                )
+            st.caption("**Order:** " + " → ".join(f.name for f in ordered))
+
+        c1, c2, _ = st.columns([1, 1, 2])
+        if c1.button(
+            "▶️ Finish transcribing",
+            type="primary",
+            disabled=not ordered,
+            use_container_width=True,
+        ):
+            try:
+                saved = library.load(entry.id)
+            except (LibraryError, StorageError) as exc:
+                st.error(f"That lecture could not be reopened: {exc}")
+                return True
+            st.session_state.library_id = entry.id
+            st.session_state.source_filename = entry.title
+            run_transcription(ordered, settings, user, resume_from=saved.transcript)
+
+        if c2.button(
+            "Keep what I have",
+            use_container_width=True,
+            help="Marks the lecture finished with the parts already transcribed. "
+            "You can summarize and generate questions from a partial lecture.",
+        ):
+            try:
+                saved = library.load(entry.id)
+                saved.transcript.pending_parts = []
+                library.save(
+                    saved.transcript,
+                    title=entry.title,
+                    summary=saved.summary,
+                    quizzes=saved.quizzes,
+                    origin=entry.origin,
+                    entry_id=entry.id,
+                )
+                st.toast("Marked as finished.", icon="✅")
+                st.rerun()
+            except (LibraryError, StorageError) as exc:
+                st.error(str(exc))
+
+    return True
+
+
 def input_section(settings: AppSettings, user: User, review: bool) -> None:
+    if resume_panel(settings, user):
+        st.divider()
+
     mode = st.radio(
         "Where is the lecture coming from?",
         ["🎙️ Audio file(s)", "📄 An existing transcript"],
@@ -1160,7 +1417,7 @@ def input_section(settings: AppSettings, user: User, review: bool) -> None:
                     "**Transcription order:** " + " → ".join(f.name for f in ordered)
                 )
         action_label, ready, runner = "1 · Transcribe", bool(ordered), (
-            lambda: run_transcription(ordered, settings)
+            lambda: run_transcription(ordered, settings, user)
         )
     else:
         imported = st.file_uploader(
@@ -1170,7 +1427,7 @@ def input_section(settings: AppSettings, user: User, review: bool) -> None:
             "Plain text is fine — timings are then estimated.",
         )
         action_label, ready, runner = "1 · Import transcript", imported is not None, (
-            lambda: run_transcript_import(imported)
+            lambda: run_transcript_import(imported, user)
         )
 
     a1, a2, _ = st.columns([1, 1, 2])
@@ -1449,6 +1706,122 @@ def export_tab() -> None:
                        "application/pdf", use_container_width=True)
     p3.download_button("⬇️ Markdown", export_markdown(quiz, doc_summary), f"{stem}.md",
                        "text/markdown", use_container_width=True)
+
+
+def library_tab(user: User) -> None:
+    """Saved lectures — the transcript, its summary, and its question sets."""
+    library = get_library(user)
+    if library is None:
+        st.error("Your library is unavailable because storage is not configured.")
+        return
+
+    store, _, _, _, warning, _ = get_backend()
+    if warning:
+        st.warning(
+            "Nothing here will survive a restart until storage is configured. "
+            + warning,
+            icon="⚠️",
+        )
+
+    try:
+        entries = library.entries()
+    except StorageError as exc:
+        st.error(str(exc))
+        return
+
+    st.caption(
+        "Lectures are saved automatically as soon as they are transcribed or "
+        "imported, and updated when you generate questions. Stored encrypted in "
+        f"{store.describe()}."
+    )
+
+    if not entries:
+        st.info(
+            "Nothing saved yet. Transcribe or import a lecture and it will appear here."
+        )
+        return
+
+    current = st.session_state.get("library_id")
+    for entry in entries:
+        marker = " · open" if entry.id == current else ""
+        with st.expander(f"**{entry.title}**{marker}", expanded=False):
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Length", entry.length_label)
+            c2.metric("Words", f"{entry.word_count:,}")
+            c3.metric("Parts", entry.parts)
+            c4.metric("Questions", entry.questions or "—")
+            st.caption(
+                f"{entry.summary_label} · saved {entry.saved_label} · "
+                f"{entry.origin or 'audio'}"
+                + (f" · {entry.source_filename}" if entry.source_filename else "")
+            )
+
+            a1, a2 = st.columns(2)
+            if a1.button(
+                "📂 Open this lecture", key=f"open_{entry.id}", use_container_width=True,
+                type="primary" if entry.id != current else "secondary",
+            ):
+                load_saved_lecture(library, entry.id)
+
+            if a2.button("🗑 Delete", key=f"delx_{entry.id}", use_container_width=True):
+                st.session_state[f"confirm_del_{entry.id}"] = True
+
+            if st.session_state.get(f"confirm_del_{entry.id}"):
+                st.warning(
+                    f"Delete **{entry.title}** and everything generated from it? "
+                    "This cannot be undone.",
+                    icon="⚠️",
+                )
+                d1, d2 = st.columns(2)
+                if d1.button("Delete permanently", key=f"dely_{entry.id}", type="primary"):
+                    try:
+                        library.delete(entry.id)
+                        if st.session_state.get("library_id") == entry.id:
+                            st.session_state.library_id = None
+                        st.session_state.pop(f"confirm_del_{entry.id}", None)
+                        st.toast(f"Deleted {entry.title}.", icon="🗑")
+                        st.rerun()
+                    except (LibraryError, StorageError) as exc:
+                        st.error(str(exc))
+                if d2.button("Cancel", key=f"deln_{entry.id}"):
+                    st.session_state.pop(f"confirm_del_{entry.id}", None)
+                    st.rerun()
+
+            with st.form(f"rename_{entry.id}"):
+                new_title = st.text_input("Title", entry.title)
+                if st.form_submit_button("Rename") and new_title != entry.title:
+                    try:
+                        library.rename(entry.id, new_title)
+                        st.rerun()
+                    except (LibraryError, StorageError) as exc:
+                        st.error(str(exc))
+
+
+def load_saved_lecture(library: TranscriptLibrary, entry_id: str) -> None:
+    """Restore a whole working state — not just the text."""
+    try:
+        saved = library.load(entry_id)
+    except (LibraryError, StorageError) as exc:
+        st.error(str(exc))
+        return
+
+    st.session_state.transcript = saved.transcript
+    st.session_state.transcript_note = saved.entry.origin
+    st.session_state.source_filename = saved.entry.source_filename or saved.entry.title
+    st.session_state.summary = saved.summary
+    st.session_state.quiz_versions = list(saved.quizzes)
+    st.session_state.quiz = saved.quizzes[-1] if saved.quizzes else None
+    st.session_state.active_version = max(0, len(saved.quizzes) - 1)
+    st.session_state.generation_notes = []
+    st.session_state.run_report = None
+    st.session_state.library_id = entry_id
+
+    # Chunks are cheap to rebuild and are what the regenerate and replace
+    # buttons need; without them a reopened lecture would be read-only.
+    st.session_state.chunks = chunk_transcript(saved.transcript, 600, 30)
+
+    st.toast(f"Opened {saved.entry.title}.", icon="📂")
+    st.rerun()
 
 
 def usage_tab(user: User) -> None:
@@ -2056,7 +2429,10 @@ def main() -> None:
     input_section(settings, user, review)
     st.divider()
 
-    names = ["📝 Transcript", "📋 Summary", "❓ Questions", "⬇️ Export", "📊 Usage"]
+    names = [
+        "📝 Transcript", "📋 Summary", "❓ Questions",
+        "⬇️ Export", "📚 Library", "📊 Usage",
+    ]
     if user.is_admin:
         names.append("🛠️ Admin")
     tabs = st.tabs(names)
@@ -2070,9 +2446,11 @@ def main() -> None:
     with tabs[3]:
         export_tab()
     with tabs[4]:
+        library_tab(user)
+    with tabs[5]:
         usage_tab(user)
     if user.is_admin:
-        with tabs[5]:
+        with tabs[6]:
             admin_tab(directory, user)
 
 

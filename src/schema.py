@@ -65,9 +65,27 @@ class Transcript(BaseModel):
     parts: list[TranscriptPart] = Field(default_factory=list)
     skipped_parts: list[str] = Field(default_factory=list)
 
+    # Filenames of parts that have not been transcribed yet, in order. A
+    # transcript checkpointed halfway through a split recording carries the rest
+    # of the queue here, which is what makes resuming possible: the saved
+    # document knows what is missing, so a crashed run costs one part rather
+    # than the whole lecture. Empty means finished.
+    pending_parts: list[str] = Field(default_factory=list)
+
     @property
     def is_multipart(self) -> bool:
         return len(self.parts) > 1
+
+    @property
+    def is_complete(self) -> bool:
+        return not self.pending_parts
+
+    @property
+    def progress_label(self) -> str:
+        """e.g. "2 of 3 parts transcribed" — for the library list and resume UI."""
+        done = len(self.parts)
+        total = done + len(self.pending_parts)
+        return f"{done} of {total} parts transcribed"
 
     @property
     def text(self) -> str:

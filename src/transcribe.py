@@ -115,6 +115,89 @@ def transcribe_file(
     )
 
 
+class TranscriptBuilder:
+    """Stitches parts onto one continuous timeline, and can be resumed.
+
+    Pulled out of ``transcribe_parts`` so that a half-finished recording is a
+    real, saveable object rather than a local variable. That is the whole point:
+    the accumulated state used to live only in a Python list, so a process death
+    on the last part discarded every part before it.
+
+    Each part's timestamps are shifted by the running total before its segments
+    are appended, so a question generated from part three points at 0:52:14 of
+    the lecture rather than 0:02:14 of the third file.
+    """
+
+    def __init__(self, language: str = "en", model_name: str = ""):
+        self.segments: list[Segment] = []
+        self.parts: list[TranscriptPart] = []
+        self.failures: list[str] = []
+        self.offset = 0.0
+        self.language = language or "en"
+        self.model_name = model_name
+
+    @classmethod
+    def resuming(cls, transcript: Transcript) -> "TranscriptBuilder":
+        """Continue from a checkpoint, appending after everything already done."""
+        builder = cls(transcript.language, transcript.model_name)
+        builder.segments = list(transcript.segments)
+        builder.parts = list(transcript.parts)
+        builder.failures = list(transcript.skipped_parts)
+        # Resume where the saved timeline ends, not at zero — otherwise the new
+        # part would overwrite the old one's timestamps.
+        builder.offset = transcript.duration or (
+            transcript.segments[-1].end if transcript.segments else 0.0
+        )
+        return builder
+
+    @property
+    def part_index(self) -> int:
+        return len(self.parts)
+
+    def add(self, part: Transcript, filename: str, probed_duration: float = 0.0) -> None:
+        index = self.part_index
+        for seg in part.segments:
+            self.segments.append(
+                Segment(
+                    index=len(self.segments),
+                    start=seg.start + self.offset,
+                    end=seg.end + self.offset,
+                    text=seg.text,
+                    part=index,
+                )
+            )
+
+        # Prefer the container's reported duration over the last segment's end,
+        # so trailing silence in a part does not shift everything after it.
+        measured = max(probed_duration, part.duration, part.segments[-1].end)
+        self.parts.append(
+            TranscriptPart(
+                index=index,
+                filename=filename,
+                offset=self.offset,
+                duration=measured,
+                segments=len(part.segments),
+            )
+        )
+        self.offset += measured
+        self.language = part.language or self.language
+
+    def skip(self, filename: str, reason: str) -> None:
+        self.failures.append(f"{filename}: {reason}")
+
+    def build(self, pending: list[str] | None = None) -> Transcript:
+        """Snapshot the work so far. ``pending`` names the parts still to come."""
+        return Transcript(
+            segments=list(self.segments),
+            language=self.language,
+            duration=self.offset,
+            model_name=self.model_name,
+            parts=list(self.parts),
+            skipped_parts=list(self.failures),
+            pending_parts=list(pending or []),
+        )
+
+
 def transcribe_parts(
     model: Any,
     audio_paths: list[str],
@@ -123,24 +206,32 @@ def transcribe_parts(
     vad_filter: bool = True,
     beam_size: int = 1,
     progress: ProgressFn | None = None,
+    on_part_complete: Callable[[Transcript], None] | None = None,
+    resume_from: Transcript | None = None,
 ) -> Transcript:
     """Transcribe several files in order and stitch them into one transcript.
 
     This exists because the practical ceiling on a single upload is not the
     lecture — it is the host. Splitting a 75-minute recording into three
     25-minute files and handing them over in order produces exactly the same
-    combined transcript as one long upload, because each part's timestamps are
-    shifted by the running total before its segments are appended. A question
-    generated from part three still points at 0:52:14 of the lecture, not
-    0:02:14 of the third file.
+    combined transcript as one long upload.
 
     Files are transcribed **sequentially**, not in parallel: the Whisper model is
     a single shared object and running it concurrently on one CPU core would be
     slower, not faster.
 
-    Splits are assumed to be contiguous and non-overlapping. If parts overlap,
-    the overlapping speech appears twice — the near-duplicate check will flag
-    resulting questions, but trimming the overlap beforehand is better.
+    ``on_part_complete`` is called with a valid, saveable :class:`Transcript`
+    after each part finishes, carrying the remaining filenames in
+    ``pending_parts``. **Callers should persist it.** A container that runs out
+    of memory is SIGKILLed: no exception is raised, no ``except`` runs, no
+    ``finally`` runs. The only state that survives is state already written down,
+    so a checkpoint after each part is the difference between losing one part and
+    losing the lecture. This matters most for split recordings, because splitting
+    is what people do when a single run is already too big for the host.
+
+    ``resume_from`` continues a checkpoint: the new parts are appended after
+    everything it already contains. Splits are assumed contiguous and
+    non-overlapping; overlapping parts duplicate the overlapping speech.
     """
     if not audio_paths:
         raise TranscriptionError("No audio files were provided.")
@@ -154,20 +245,25 @@ def transcribe_parts(
     part_durations = [probe_duration(p) for p in audio_paths]
     known_total = sum(d for d in part_durations if d > 0)
 
-    all_segments: list[Segment] = []
-    parts: list[TranscriptPart] = []
-    offset = 0.0
-    language_seen = language or "en"
-    failures: list[str] = []
+    builder = (
+        TranscriptBuilder.resuming(resume_from)
+        if resume_from is not None
+        else TranscriptBuilder(
+            language or "en", getattr(model, "model_size_or_path", "faster-whisper")
+        )
+    )
+    already_done = len(builder.parts)
+    total_parts = already_done + len(audio_paths)
 
     for i, (path, name) in enumerate(zip(audio_paths, names)):
-        part_label = f"part {i + 1} of {len(audio_paths)} ({name})"
+        part_label = f"part {already_done + i + 1} of {total_parts} ({name})"
+        base_offset = sum(d for d in part_durations[:i] if d > 0)
 
-        def part_progress(frac: float, message: str, _i=i, _offset=offset) -> None:
+        def part_progress(frac: float, message: str, _i=i, _base=base_offset) -> None:
             if progress is None:
                 return
             if known_total > 0:
-                elapsed = _offset + frac * max(part_durations[_i], 0.0)
+                elapsed = _base + frac * max(part_durations[_i], 0.0)
                 overall = min(0.99, elapsed / known_total)
             else:
                 overall = min(0.99, (_i + frac) / len(audio_paths))
@@ -184,53 +280,44 @@ def transcribe_parts(
             )
         except TranscriptionError as exc:
             # One unreadable or silent part should not throw away the rest.
-            failures.append(f"{name}: {exc}")
+            builder.skip(name, str(exc))
+            _checkpoint(builder, names[i + 1 :], on_part_complete)
             continue
 
-        for seg in part.segments:
-            all_segments.append(
-                Segment(
-                    index=len(all_segments),
-                    start=seg.start + offset,
-                    end=seg.end + offset,
-                    text=seg.text,
-                    part=i,
-                )
-            )
+        builder.add(part, name, part_durations[i])
+        _checkpoint(builder, names[i + 1 :], on_part_complete)
 
-        # Prefer the container's reported duration over the last segment's end,
-        # so trailing silence in a part does not shift everything after it.
-        measured = max(part_durations[i], part.duration, part.segments[-1].end)
-        parts.append(
-            TranscriptPart(
-                index=i,
-                filename=name,
-                offset=offset,
-                duration=measured,
-                segments=len(part.segments),
-            )
-        )
-        offset += measured
-        language_seen = part.language or language_seen
-
-    if not all_segments:
+    if not builder.segments:
         raise TranscriptionError(
             "No speech was detected in any part. "
-            + (" ".join(failures) if failures else "")
+            + (" ".join(builder.failures) if builder.failures else "")
         )
 
     if progress:
-        note = f" ({len(failures)} part(s) skipped)" if failures else ""
-        progress(1.0, f"Combined {len(parts)} part(s) — {len(all_segments)} segments{note}")
+        note = f" ({len(builder.failures)} part(s) skipped)" if builder.failures else ""
+        progress(
+            1.0,
+            f"Combined {len(builder.parts)} part(s) — "
+            f"{len(builder.segments)} segments{note}",
+        )
 
-    return Transcript(
-        segments=all_segments,
-        language=language_seen,
-        duration=offset,
-        model_name=getattr(model, "model_size_or_path", "faster-whisper"),
-        parts=parts,
-        skipped_parts=failures,
-    )
+    return builder.build()
+
+
+def _checkpoint(
+    builder: TranscriptBuilder,
+    pending: list[str],
+    on_part_complete: Callable[[Transcript], None] | None,
+) -> None:
+    """Hand the caller a saveable snapshot, without letting a save failure kill
+    the run. Storage being briefly unavailable is a reason to keep transcribing,
+    not to discard the parts already done."""
+    if on_part_complete is None or not builder.segments:
+        return
+    try:
+        on_part_complete(builder.build(pending))
+    except Exception:  # noqa: BLE001 - a checkpoint is best-effort by design
+        pass
 
 
 def natural_sort_key(name: str) -> tuple:

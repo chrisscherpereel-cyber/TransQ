@@ -159,7 +159,25 @@ def test_a_silent_part_is_skipped_without_losing_the_others(parts):
     assert len(t.parts) == 2
     assert len(t.skipped_parts) == 1
     assert names[1] in t.skipped_parts[0]
-    assert {s.part for s in t.segments} == {0, 2}
+
+
+def test_segment_part_numbers_index_the_parts_that_survived(parts):
+    """``seg.part`` must be a valid index into ``transcript.parts``.
+
+    It once carried the *upload* position, so skipping the middle file of three
+    produced segments labelled ``part=2`` on a transcript holding two parts —
+    and ``transcript.parts[seg.part]`` raised IndexError. Numbering now follows
+    what is actually in the transcript, which is also what lets a resumed
+    lecture continue the sequence instead of restarting at zero.
+    """
+    names, paths = parts
+    model = FakeWhisper({n: 600.0 for n in names}, silent={names[1]})
+    t = transcribe_parts(model, paths, display_names=names)
+
+    assert {s.part for s in t.segments} == {0, 1}
+    for seg in t.segments:
+        assert t.parts[seg.part].filename != names[1]
+    assert [p.index for p in t.parts] == list(range(len(t.parts)))
 
 
 def test_all_parts_silent_raises(parts):

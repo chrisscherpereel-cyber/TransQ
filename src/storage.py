@@ -249,6 +249,7 @@ class DropboxStore(Store):
             raise StorageError("pip install dropbox") from exc
 
         self._dropbox = dropbox
+        self.last_error = ""
         self._client = dropbox.Dropbox(
             app_key=app_key,
             app_secret=app_secret,
@@ -332,14 +333,52 @@ class DropboxStore(Store):
         return sorted(found)
 
     def available(self) -> bool:
+        """Probe with a call this app actually makes.
+
+        This used to call ``users_get_current_account()``, which needs the
+        ``account_info.read`` scope — one the app never otherwise uses. Anyone
+        who granted only the file scopes had a perfectly working Dropbox and a
+        health check that failed, so they were silently downgraded to local
+        files with a message blaming their credentials. Listing the app folder
+        needs ``files.metadata.read``, which is required for the app to work at
+        all, so a pass here means Dropbox will genuinely function.
+        """
         try:
-            self._client.users_get_current_account()
+            self._client.files_list_folder("", limit=1)
+            self.last_error = ""
             return True
-        except Exception:
+        except self._dropbox.exceptions.ApiError as exc:
+            if _is_not_found(exc):
+                self.last_error = ""
+                return True  # an empty app folder is a fine starting point
+            self.last_error = _explain_dropbox(exc)
+            return False
+        except Exception as exc:
+            self.last_error = _explain_dropbox(exc)
             return False
 
     def describe(self) -> str:
         return f"Dropbox app folder ({self.folder})"
+
+
+def _explain_dropbox(exc: Exception) -> str:
+    """Turn a Dropbox failure into something an administrator can act on."""
+    text = str(exc).lower()
+    if "missing_scope" in text or "insufficient" in text:
+        return (
+            "the token is missing a permission. In the Dropbox App Console, "
+            "under Permissions, tick files.metadata.read, files.metadata.write, "
+            "files.content.read and files.content.write, press Submit, then "
+            "generate a NEW refresh token — existing tokens keep the old scopes."
+        )
+    if "invalid_grant" in text or "invalid_client" in text:
+        return (
+            "the refresh token or app key/secret was rejected. Check for stray "
+            "spaces, and that the token was issued by this same app."
+        )
+    if "expired_access_token" in text:
+        return "the token has expired; generate a new refresh token."
+    return str(exc)[:200]
 
 
 def _is_not_found(exc: Exception) -> bool:
@@ -529,8 +568,10 @@ def _make_backend(secrets: dict[str, str], cipher: Cipher) -> tuple[Store, str |
             if store.available():
                 return store, None
             return LocalStore(cipher, data_dir), (
-                "Dropbox credentials are set but Dropbox rejected them. Falling back "
-                "to local files, which do NOT survive a restart on Streamlit Cloud."
+                "Dropbox credentials are set but the connection failed — "
+                f"{store.last_error or 'no further detail'} "
+                "Falling back to local files, which do NOT survive a restart on "
+                "Streamlit Cloud."
             )
         except StorageError as exc:
             return LocalStore(cipher, data_dir), (
