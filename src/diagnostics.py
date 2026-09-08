@@ -75,9 +75,19 @@ class RunReport:
         return [s for s in self.steps if s.phase == phase]
 
     def phase_failed_entirely(self, phase: str) -> bool:
-        """Every attempt in a phase failed — not just a bad patch of audio."""
+        """The phase produced nothing at all — not just a bad patch of audio.
+
+        Judged on output, not on status. A chunk whose reply was cut off logs a
+        retry *and* may still yield questions salvaged from the truncated text;
+        counting that as a total failure would abandon work the model actually
+        did. Equally, a chunk that logged a retry and then failed produced
+        nothing and must still read as failed — which "no step was skipped"
+        got wrong in the other direction.
+        """
         steps = self.phase_steps(phase)
-        return bool(steps) and all(s.is_failure for s in steps)
+        if not steps or any(s.produced for s in steps):
+            return False
+        return any(s.is_failure for s in steps)
 
     def causes(self) -> Counter:
         return Counter(s.cause for s in self.failures if s.cause)
@@ -131,10 +141,14 @@ CAUSE_OTHER = "other"
 
 ADVICE = {
     CAUSE_TRUNCATED: (
-        "The model's reply was cut off before it finished. Ask for fewer questions "
-        "per run, shorten the chunk length in **Context & advanced**, or pick a "
-        "model with a larger output limit. Reasoning models are especially prone "
-        "to this because their thinking counts against the output budget."
+        "The model's reply was cut off before it finished. Whatever it completed "
+        "before the cut has been kept — check the steps above for how many — so "
+        "this is a shortfall rather than a loss. To stop it recurring: ask for "
+        "fewer questions per run, shorten the chunk length in **Context & "
+        "advanced**, or pick a model with a larger output limit. Reasoning models "
+        "are especially prone to it because their thinking counts against the "
+        "output budget, so switching to a non-reasoning model often fixes it "
+        "outright."
     ),
     CAUSE_RATE_LIMIT: (
         "The provider is rate-limiting this key. Free models on OpenRouter have "

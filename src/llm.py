@@ -37,7 +37,16 @@ class TruncatedResponseError(LLMError):
     Worth its own type because it is the one failure with a specific, actionable
     fix (ask for less at a time) and because retrying it unchanged just burns
     tokens producing the same truncated answer.
+
+    Carries ``raw``: the text received before the cut. A reply truncated at
+    question seven of ten still contains six complete questions that were paid
+    for, and discarding them — which is what raising a bare exception did —
+    throws away work the model actually did. Callers salvage from this.
     """
+
+    def __init__(self, message: str, raw: str = ""):
+        super().__init__(message)
+        self.raw = raw or ""
 
 
 @dataclass
@@ -250,7 +259,8 @@ class LLMClient:
             raise TruncatedResponseError(
                 "Gemini stopped at its output limit — the reply is incomplete. "
                 "Ask for fewer questions per run, or use a shorter chunk length. "
-                "Gemini 3.x counts its reasoning against the output budget."
+                "Gemini 3.x counts its reasoning against the output budget.",
+                raw=text or "",
             )
         if not text:
             raise LLMError(
@@ -343,6 +353,73 @@ def _looks_truncated(text: str) -> bool:
     return in_string or depth > 0
 
 
+def salvage_array_objects(raw: str, key: str) -> list[dict[str, Any]]:
+    """Recover every complete object from a JSON array that was cut off.
+
+    A reply truncated partway through ``{"questions": [ ... ]}`` is not
+    worthless: the objects before the cut are complete, valid, and already paid
+    for. Standard parsing rejects the whole document because the array never
+    closes, which is correct as parsing and wrong as behaviour — it turns a
+    partial success into a total loss and bills for it.
+
+    So this walks the array itself and returns each element that closed cleanly,
+    stopping at the incomplete one. Anything it cannot parse is skipped rather
+    than raised: the caller already knows the reply was broken, and the point
+    here is to rescue what survived, not to re-diagnose it.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return []
+
+    fence = re.search(r"```(?:json)?\s*(.*)", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+
+    marker = re.search(rf'"{re.escape(key)}"\s*:\s*\[', text)
+    if not marker:
+        return []
+
+    found: list[dict[str, Any]] = []
+    depth, start = 0, -1
+    in_string, escaped = False, False
+
+    for i in range(marker.end(), len(text)):
+        char = text[i]
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+
+        if char == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                try:
+                    item = json.loads(text[start : i + 1])
+                except json.JSONDecodeError:
+                    pass
+                else:
+                    if isinstance(item, dict):
+                        found.append(item)
+                start = -1
+            elif depth < 0:
+                break  # the array closed; nothing further belongs to it
+        elif char == "]" and depth == 0:
+            break
+
+    return found
+
+
 def _is_transient(exc: Exception) -> bool:
     text = f"{type(exc).__name__} {exc}".lower()
     markers = (
@@ -387,7 +464,8 @@ def parse_json_object(raw: str) -> dict[str, Any]:
                 raise TruncatedResponseError(
                     "The model's reply was cut off before the JSON closed "
                     f"({len(text)} characters received). Ask for fewer questions "
-                    "per run, or use a shorter chunk length."
+                    "per run, or use a shorter chunk length.",
+                    raw=text,
                 )
             raise LLMError(f"Could not find JSON in the model response: {text[:300]}")
         try:
@@ -396,7 +474,8 @@ def parse_json_object(raw: str) -> dict[str, Any]:
             if _looks_truncated(text):
                 raise TruncatedResponseError(
                     "The model's reply was cut off mid-JSON. Ask for fewer "
-                    "questions per run, or use a shorter chunk length."
+                    "questions per run, or use a shorter chunk length.",
+                    raw=text,
                 ) from exc
             raise LLMError(f"Model returned malformed JSON: {exc}") from exc
 

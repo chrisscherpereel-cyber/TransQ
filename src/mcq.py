@@ -31,7 +31,12 @@ from .diagnostics import (
     classify,
     short_reason,
 )
-from .llm import LLMClient, LLMError, TruncatedResponseError
+from .llm import (
+    LLMClient,
+    LLMError,
+    TruncatedResponseError,
+    salvage_array_objects,
+)
 from .schema import MCQ, Chunk, format_timestamp, parse_timestamp
 
 ProgressFn = Callable[[float, str], None]
@@ -153,21 +158,65 @@ def generate_questions(
 
         try:
             try:
-                data = _ask(want, max(2000, want * 700))
+                # Budget generously up front. A truncated reply costs the whole
+                # input again on retry, so an under-sized budget is more
+                # expensive than an over-sized one — and reasoning models spend
+                # this allowance on thinking before a single question appears,
+                # which is why truncation was hitting every chunk rather than
+                # the occasional long one.
+                data = _ask(want, max(4000, want * 900))
             except TruncatedResponseError as exc:
-                # The model ran out of room mid-answer. Asking for half as many
-                # with a bigger budget usually succeeds, and half a chunk's
-                # questions beats none — the top-up rounds cover the rest.
-                reduced = max(1, want // 2)
+                # The model ran out of room mid-answer. Everything it completed
+                # before the cut is valid and already paid for, so take that
+                # first — discarding it turned a partial success into a total
+                # loss and billed for the privilege. Then ask for the remainder
+                # in a smaller batch with a bigger budget.
+                rescued = salvage_array_objects(exc.raw, "questions")
+                shortfall = max(0, want - len(rescued))
+                reduced = max(1, min(shortfall or want, max(1, want // 2)))
+
                 report.record(
                     PHASE_GENERATE, chunk.label, SKIPPED,
-                    detail=f"reply was cut off at {want} questions; retrying with {reduced}",
+                    detail=(
+                        f"reply was cut off at {want} questions; "
+                        f"kept {len(rescued)} complete item(s) from it"
+                        + (f", retrying for {reduced} more" if shortfall else "")
+                    ),
                     cause=classify(exc),
                 )
                 if progress:
-                    progress(0.95, f"{chunk.label}: reply cut off, retrying smaller")
-                data = _ask(reduced, max(3000, reduced * 1200))
-                want = reduced
+                    progress(
+                        0.95,
+                        f"{chunk.label}: reply cut off, kept {len(rescued)}"
+                        + (f", retrying for {reduced}" if shortfall else ""),
+                    )
+
+                if not shortfall:
+                    data = {"questions": rescued}
+                else:
+                    try:
+                        again = _ask(reduced, max(6000, reduced * 1600))
+                    except TruncatedResponseError as second:
+                        # Cut off twice. Salvage that reply too and keep going
+                        # with whatever both attempts produced — only a run that
+                        # rescued nothing at all is a failure.
+                        rescued += salvage_array_objects(second.raw, "questions")
+                        if not rescued:
+                            raise
+                        report.record(
+                            PHASE_GENERATE, chunk.label, SKIPPED,
+                            detail=(
+                                f"cut off again; kept {len(rescued)} item(s) in total "
+                                "rather than discarding the run"
+                            ),
+                            cause=classify(second),
+                        )
+                        data = {"questions": rescued}
+                    else:
+                        data = {
+                            "questions": rescued + (again.get("questions") or [])
+                        }
+                want = max(1, len(data.get("questions") or []) or reduced)
         except Exception as exc:
             # Was: a progress message that the next repaint erased. A failure
             # here is the single most likely reason a run "finishes" with

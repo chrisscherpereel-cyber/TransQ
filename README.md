@@ -642,6 +642,7 @@ lecture-quiz-builder/
     ├── test_library.py              save/load round-trips, per-account isolation
     ├── test_question_focus.py       importance-weighted allocation, focus clause
     ├── test_alternative_sets.py     third and fourth sets, cross-set difference
+    ├── test_truncation_salvage.py   keeping questions written before a cut-off
     ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
     └── test_hostinfo.py             memory detection and the model-fit verdicts
@@ -652,7 +653,7 @@ lecture-quiz-builder/
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 421 tests, no API keys or network needed
+pytest -q          # 436 tests, no API keys or network needed
 ```
 
 ---
