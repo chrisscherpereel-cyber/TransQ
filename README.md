@@ -39,7 +39,7 @@ part 3 ─┘    (sequential)       (one timeline)         │
 | **Validate** | Mechanical checks for "all of the above", duplicate options, giveaway answer length, negative stems, near-duplicate questions, missing provenance |
 | **Balance** | Correct answers are redistributed across A/B/C/D — LLMs have a strong positional bias students notice fast |
 | **Edit** | Every stem, option, and answer key is editable in the browser before export |
-| **Regenerate** | Ask for a whole alternative set (kept side by side with the first), or replace any single question with a newly written one |
+| **Regenerate** | Ask for as many alternative sets as you like — each is steered away from every question already written for that lecture, and labelled with the model that produced it, so switching models is a real comparison. Or replace any single question |
 | **Export** | QTI 1.2 (Canvas) · QTI 2.1 · XLSX · CSV · DOCX · PDF · Markdown · SRT/VTT captions |
 | **Accounts** | Sign-in with lockout and idle timeout, admin-created users, per-account settings, and personal API keys encrypted so only that user can read them |
 | **Issued keys** | Mint a capped, revocable OpenRouter key per person — no collecting personal credentials |
@@ -641,6 +641,7 @@ lecture-quiz-builder/
     ├── test_failure_reporting.py    truncation, rate limits, silent-failure guards
     ├── test_library.py              save/load round-trips, per-account isolation
     ├── test_question_focus.py       importance-weighted allocation, focus clause
+    ├── test_alternative_sets.py     third and fourth sets, cross-set difference
     ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
     └── test_hostinfo.py             memory detection and the model-fit verdicts
@@ -651,7 +652,7 @@ lecture-quiz-builder/
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 411 tests, no API keys or network needed
+pytest -q          # 421 tests, no API keys or network needed
 ```
 
 ---

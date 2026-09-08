@@ -241,6 +241,7 @@ def generate_question_set(
     difficulty_mix: str = "Balanced",
     course_context: str = "",
     summary: Any = None,
+    avoid_stems: list[str] | None = None,
     do_review: bool = True,
     max_rounds: int = 3,
     progress: ProgressFn | None = None,
@@ -291,6 +292,13 @@ def generate_question_set(
         focus_points=focus_points,
     )
 
+    # Questions that already exist in *other* sets for this lecture. Without
+    # these, an "alternative" set is written in ignorance of the first one and
+    # reproduces it — the salient points of a chunk are the salient points
+    # whichever time you ask. That made a second set look redundant and a third
+    # look impossible.
+    existing = list(avoid_stems or [])
+
     questions: list[MCQ] = []
     rotation = 0
 
@@ -303,12 +311,12 @@ def generate_question_set(
         client,
         chunks,
         allocate_by_importance(target, chunks, summary),
-        avoid_stems=[],
+        avoid_stems=existing,
         progress=lambda f, m: _emit(f * 0.5, m),
         report=report,
         **common,
     )
-    questions = _drop_duplicates(questions)
+    questions = _drop_duplicates(questions, existing)
 
     # Distinguish "the model could not be reached" from "this lecture is thin".
     # The old code reported both as "returned nothing new for this material".
@@ -332,12 +340,12 @@ def generate_question_set(
             client,
             chunks,
             _allocate_topup(shortfall, chunks, rotation, weights),
-            avoid_stems=[q.stem for q in questions],
+            avoid_stems=existing + [q.stem for q in questions],
             report=report,
             **common,
         )
         before = len(questions)
-        questions = _drop_duplicates(questions + extra)
+        questions = _drop_duplicates(questions + extra, existing)
         if len(questions) == before:
             # Another round will not help if this one added nothing usable —
             # but say *which* kind of nothing, since a failing API and a thin
@@ -369,11 +377,11 @@ def generate_question_set(
                 client,
                 chunks,
                 _allocate_topup(need, chunks, rotation, weights),
-                avoid_stems=[q.stem for q in questions],
+                avoid_stems=existing + [q.stem for q in questions],
                 report=report,
                 **common,
             )
-            questions = _drop_duplicates(questions + replacements)
+            questions = _drop_duplicates(questions + replacements, existing)
 
     # --- Settle on exactly `target` -------------------------------------- #
     questions = balance_answer_positions(questions)
@@ -388,10 +396,20 @@ def _included(questions: list[MCQ]) -> list[MCQ]:
     return [q for q in questions if q.include]
 
 
-def _drop_duplicates(questions: list[MCQ]) -> list[MCQ]:
-    """Remove near-identical stems produced across rounds, keeping the first."""
+def _drop_duplicates(
+    questions: list[MCQ], against: list[str] | None = None
+) -> list[MCQ]:
+    """Remove near-identical stems, keeping the first.
+
+    ``against`` seeds the comparison with stems from question sets generated
+    earlier for this lecture, so an alternative set is measured against what
+    already exists rather than only against itself. A dropped near-duplicate
+    then shows up as a shortfall, which the top-up rounds make good — the set
+    comes back to full size with genuinely different questions instead of
+    quietly repeating the first set.
+    """
     kept: list[MCQ] = []
-    seen: list[set[str]] = []
+    seen: list[set[str]] = [_content_tokens(s) for s in (against or []) if s]
     for q in questions:
         tokens = _content_tokens(q.stem)
         if any(_jaccard(tokens, other) >= DROP_DUPLICATE_THRESHOLD for other in seen):

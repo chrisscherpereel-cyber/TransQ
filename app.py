@@ -1614,6 +1614,15 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
             difficulty_mix=settings.difficulty_mix,
             course_context=settings.course_context,
             summary=summary,
+            # Every question already written for this lecture, across every set.
+            # Without this the "alternative" pass ran blind to the first set and
+            # rewrote it, which made a second set look redundant and a third
+            # look impossible.
+            avoid_stems=[
+                q.stem
+                for version in st.session_state.quiz_versions
+                for q in version.questions
+            ],
             do_review=do_review,
             progress=lambda f, m: bar.progress(f, text=m),
             report=report,
@@ -1960,7 +1969,10 @@ def version_bar(settings: AppSettings, user: User, review: bool) -> None:
 
     with left:
         if len(versions) > 1:
-            labels = [f"Set {i + 1} ({len(v.included)} questions)" for i, v in enumerate(versions)]
+            labels = [
+                f"Set {i + 1} · {len(v.included)}q · {v.meta.model_used or 'model not recorded'}"
+                for i, v in enumerate(versions)
+            ]
             picked = st.radio(
                 "Question set", range(len(versions)),
                 index=st.session_state.active_version,
@@ -1971,7 +1983,10 @@ def version_bar(settings: AppSettings, user: User, review: bool) -> None:
                 st.session_state.quiz = versions[picked]
                 st.rerun()
         else:
-            st.caption("One set generated so far.")
+            st.caption(
+                "One set so far. Change the model in the sidebar before "
+                "generating an alternative to compare two models on this lecture."
+            )
 
     with right:
         if st.button(
