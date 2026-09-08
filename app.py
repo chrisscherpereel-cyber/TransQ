@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+import re
 import tempfile
 import time
 
@@ -173,6 +174,10 @@ def init_state() -> None:
         "run_report": None,
         "library_id": None,
         "source_filename": "",
+        # What the user calls this lecture. Set before transcription starts so
+        # the first checkpoint is already filed under a name they will recognise,
+        # rather than a recorder's filename like "20260901-111056-sp001".
+        "lecture_title": "",
         # A queued multi-part transcription: one part is done per script run,
         # so this survives between runs. See run_transcription for why.
         "job": None,
@@ -1048,6 +1053,44 @@ def order_uploads(files: list, use_upload_order: bool) -> list:
     return sorted(files, key=lambda f: natural_sort_key(f.name))
 
 
+def lecture_name() -> str:
+    """What this lecture is called — the user's name for it, else the filename.
+
+    One name governs everything downstream: the library entry, the transcript,
+    the summary, every question set, and the filename of each export. A
+    recorder's filename like ``20260901-111056-sp001_combined`` identifies the
+    *file*; ``MGT 301 — Week 4, Aggregate Planning`` identifies the lecture, and
+    is what you will be searching for in March.
+    """
+    typed = (st.session_state.get("lecture_title") or "").strip()
+    return typed or (st.session_state.get("source_filename") or "").strip()
+
+
+def name_slug(fallback: str = "lecture") -> str:
+    """The lecture name, made safe to use as a download filename."""
+    cleaned = re.sub(r"[^\w\s-]", "", lecture_name(), flags=re.UNICODE).strip()
+    cleaned = re.sub(r"[\s_-]+", "_", cleaned)
+    return cleaned[:80].strip("_") or fallback
+
+
+def lecture_name_field(key: str) -> None:
+    """Ask for the name before the work starts, not after.
+
+    Deliberately ahead of the file picker. Renaming afterwards has always been
+    possible, but a name you have to remember to fix later is a name that stays
+    wrong — and a semester of those reads as a list of recorder timestamps.
+    """
+    typed = st.text_input(
+        "Name this lecture",
+        value=st.session_state.get("lecture_title", ""),
+        key=key,
+        placeholder="e.g. MGT 301 — Week 4, Aggregate Planning",
+        help="Names the library entry and every export made from it. Leave blank "
+        "to fall back to the audio filename; either way you can rename it later.",
+    )
+    st.session_state.lecture_title = typed
+
+
 def get_library(user: User) -> TranscriptLibrary | None:
     """This account's saved lectures, or None if nothing can be saved."""
     try:
@@ -1072,7 +1115,7 @@ def autosave_transcript(user: User, origin: str) -> None:
     try:
         entry = library.save(
             transcript,
-            title=st.session_state.get("source_filename", ""),
+            title=lecture_name(),
             origin=origin,
             # Update the entry the per-part checkpoints already created, rather
             # than filing a second copy of the same lecture beside it.
@@ -1133,7 +1176,7 @@ def checkpoint_saver(user: User, origin: str):
     def save(partial: Transcript) -> None:
         entry = library.save(
             partial,
-            title=st.session_state.get("source_filename", ""),
+            title=lecture_name(),
             origin=origin,
             entry_id=st.session_state.get("library_id"),
         )
@@ -1392,7 +1435,10 @@ def store_version(quiz: Quiz) -> None:
 
 
 def build_quiz(questions, summary: Summary, settings: AppSettings, version: int) -> Quiz:
-    base = summary.title or "Lecture Quiz"
+    # Your name for the lecture wins over the model's guess at a title. You will
+    # be looking for this quiz by the name you gave the lecture, and it is what
+    # appears in Canvas after the import.
+    base = lecture_name() or summary.title or "Lecture Quiz"
     return Quiz(
         meta=QuizMeta(
             title=base if version == 1 else f"{base} — Set {version}",
@@ -1693,7 +1739,8 @@ def resume_panel(settings: AppSettings, user: User) -> bool:
                 st.error(f"That lecture could not be reopened: {exc}")
                 return True
             st.session_state.library_id = entry.id
-            st.session_state.source_filename = entry.title
+            st.session_state.source_filename = entry.source_filename or entry.title
+            st.session_state.lecture_title = entry.title
             run_transcription(ordered, settings, user, resume_from=saved.transcript)
 
         if c2.button(
@@ -1729,6 +1776,8 @@ def input_section(settings: AppSettings, user: User, review: bool) -> None:
 
     if resume_panel(settings, user):
         st.divider()
+
+    lecture_name_field("lecture_title_input")
 
     mode = st.radio(
         "Where is the lecture coming from?",
@@ -1820,7 +1869,7 @@ def transcript_tab() -> None:
 
     st.markdown("**Download transcript**")
     d1, d2, d3, d4 = st.columns(4)
-    stem = os.path.splitext(st.session_state.source_filename or "lecture")[0]
+    stem = name_slug()
     d1.download_button("Plain text", export_txt(transcript), f"{stem}.txt", "text/plain",
                        use_container_width=True)
     d2.download_button("Timestamped", export_timestamped_txt(transcript),
@@ -2086,6 +2135,27 @@ def library_tab(user: User) -> None:
         )
         return
 
+    # A semester is thirty-odd lectures. Scrolling is fine at five and useless
+    # at thirty, and the name is what you remember, so match on it — plus the
+    # source filename, for when you only recall which recording it came from.
+    total = len(entries)
+    if total > 5:
+        query = st.text_input(
+            "Find a lecture",
+            placeholder="Search by name…",
+            key="library_query",
+        ).strip().lower()
+        if query:
+            entries = [
+                e
+                for e in entries
+                if query in e.title.lower() or query in e.source_filename.lower()
+            ]
+            if not entries:
+                st.info(f"Nothing matches “{query}”. {total} lectures saved.")
+                return
+            st.caption(f"{len(entries)} of {total} lectures")
+
     current = st.session_state.get("library_id")
     for entry in entries:
         marker = " · open" if entry.id == current else ""
@@ -2133,10 +2203,15 @@ def library_tab(user: User) -> None:
                     st.rerun()
 
             with st.form(f"rename_{entry.id}"):
-                new_title = st.text_input("Title", entry.title)
+                new_title = st.text_input("Name", entry.title)
                 if st.form_submit_button("Rename") and new_title != entry.title:
                     try:
                         library.rename(entry.id, new_title)
+                        # If this is the lecture currently open, the name in the
+                        # header and on future exports has to move with it —
+                        # otherwise a rename appears to half-apply.
+                        if entry.id == current:
+                            st.session_state.lecture_title = new_title.strip()
                         st.rerun()
                     except (LibraryError, StorageError) as exc:
                         st.error(str(exc))
@@ -2153,6 +2228,7 @@ def load_saved_lecture(library: TranscriptLibrary, entry_id: str) -> None:
     st.session_state.transcript = saved.transcript
     st.session_state.transcript_note = saved.entry.origin
     st.session_state.source_filename = saved.entry.source_filename or saved.entry.title
+    st.session_state.lecture_title = saved.entry.title
     st.session_state.summary = saved.summary
     st.session_state.quiz_versions = list(saved.quizzes)
     st.session_state.quiz = saved.quizzes[-1] if saved.quizzes else None
@@ -2744,10 +2820,20 @@ def main() -> None:
     settings = sidebar(directory, user)
 
     st.title("🎓 Lecture Quiz Builder")
-    st.caption(
-        "Transcribe a lecture, summarize it, and generate a reviewable "
-        "multiple-choice bank you can import straight into your LMS."
-    )
+    # Once something is open, say what it is. Every tab below — transcript,
+    # summary, questions, exports — belongs to this one lecture, and after
+    # reopening from the library it is otherwise easy to lose track of which.
+    if st.session_state.transcript is not None and lecture_name():
+        st.markdown(f"### 📘 {lecture_name()}")
+        st.caption(
+            "Everything below belongs to this lecture — its transcript, summary "
+            "and question sets are saved together and reopen together."
+        )
+    else:
+        st.caption(
+            "Transcribe a lecture, summarize it, and generate a reviewable "
+            "multiple-choice bank you can import straight into your LMS."
+        )
     if backend_warning:
         st.warning(backend_warning, icon="⚠️")
         if "APP_SECRET" in backend_warning:

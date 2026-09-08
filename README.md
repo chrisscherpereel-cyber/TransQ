@@ -317,11 +317,35 @@ Transcription is the slow step, so nothing relies on you remembering to save. A
 lecture is written to your account the moment it is transcribed or imported, and
 the same entry is updated when you generate a summary and questions.
 
+### Name it first
+
+**Name this lecture** sits above the file picker, before you upload anything.
+Whatever you type there names the library entry, the quiz title that lands in
+Canvas, and the filename of every export — so `MGT 301 — Week 4, Aggregate
+Planning` follows the work instead of `20260901-111056-sp001_combined`.
+
+The field is deliberately *before* the upload rather than after. Renaming later
+has always been possible, but a name you have to remember to fix is a name that
+stays wrong, and a semester of those reads as a list of recorder timestamps.
+Leave it blank and the filename is still used, as before.
+
+The name is set once and then holds: a summary and question sets generated hours
+later attach to that same entry, and the per-part checkpoints during a split
+recording never overwrite it. Renaming in the Library moves the whole lecture,
+not just the listing — and if that lecture is the one you have open, the header
+and your next export follow it.
+
+### Finding it again
+
 The **📚 Library** tab lists what you have: length, word count, whether it has a
-summary, and how many question sets. **Open this lecture** restores the whole
-working state — transcript, summary, and every set — so you can export or
-regenerate without paying for any of it again. You can rename and delete entries
-there too.
+summary, and how many question sets. Past five lectures a search box appears,
+matching on the name and on the source filename for when you only remember which
+recording it came from. **Open this lecture** restores the whole working state —
+transcript, summary, and every set — so you can export or regenerate without
+paying for any of it again. Rename and delete are there too.
+
+Once a lecture is open, its name appears under the app title, because every tab
+below — transcript, summary, questions, exports — belongs to that one lecture.
 
 Two things worth knowing:
 
@@ -608,7 +632,7 @@ lecture-quiz-builder/
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 372 tests, no API keys or network needed
+pytest -q          # 378 tests, no API keys or network needed
 ```
 
 ---

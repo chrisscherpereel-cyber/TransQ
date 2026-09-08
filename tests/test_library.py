@@ -339,3 +339,92 @@ def test_entry_labels_are_readable():
 def test_entry_tolerates_fields_from_a_future_version():
     entry = LibraryEntry.from_dict({"id": "x", "title": "T", "unexpected_field": 1})
     assert entry.id == "x" and entry.title == "T"
+
+
+# --------------------------------------------------------------------------- #
+# Naming — one name holds a lecture's work together
+# --------------------------------------------------------------------------- #
+#
+# The request behind these: "I want to give transcripts a name so all related
+# files — summaries and questions — can be brought up again later." The storage
+# already grouped them; what was missing was a name worth searching for. A
+# library listing thirty entries called 20260901-111056-sp001_combined is
+# technically complete and practically unusable.
+
+
+def test_a_name_given_at_the_start_survives_everything_generated_after(library):
+    """The whole point: name it once, before transcription, and the summary and
+    every question set arrive under that same name."""
+    transcript = make_transcript()
+    first = library.save(transcript, title="MGT 301 — Week 4, Aggregate Planning")
+
+    second = library.save(
+        transcript,
+        summary=Summary(title="A model's own guess at a title"),
+        quizzes=[make_quiz(6), make_quiz(4)],
+        entry_id=first.id,
+    )
+
+    assert second.title == "MGT 301 — Week 4, Aggregate Planning"
+    assert library.count() == 1
+    reopened = library.load(second.id)
+    assert reopened.entry.title == "MGT 301 — Week 4, Aggregate Planning"
+    assert reopened.summary is not None
+    assert len(reopened.quizzes) == 2
+
+
+def test_a_later_save_never_silently_renames_a_lecture(library):
+    """Auto-save runs repeatedly. If a checkpoint could overwrite the title, the
+    name would revert to a filename halfway through a run."""
+    first = library.save(make_transcript(), title="Week 4 — capacity")
+    again = library.save(make_transcript(), entry_id=first.id)
+    assert again.title == "Week 4 — capacity"
+
+
+def test_renaming_moves_the_whole_lecture_not_just_the_listing(library):
+    entry = library.save(
+        make_transcript(), title="untitled",
+        summary=Summary(title="T"), quizzes=[make_quiz()],
+    )
+    library.rename(entry.id, "MGT 301 — Week 4")
+
+    assert library.entries()[0].title == "MGT 301 — Week 4"
+    reopened = library.load(entry.id)
+    assert reopened.entry.title == "MGT 301 — Week 4"
+    assert reopened.summary is not None and reopened.quizzes
+
+
+def test_names_are_searchable_the_way_the_library_tab_searches(library):
+    """Matching is on the name and the source filename, case-insensitively."""
+    library.save(make_transcript("wk4.mp3"), title="MGT 301 — Week 4, Aggregate Planning")
+    library.save(make_transcript("wk5.mp3"), title="MGT 301 — Week 5, Scheduling")
+    library.save(make_transcript("bus390.mp3"), title="BUS 390 — Forecasting")
+
+    def search(query: str) -> list[str]:
+        q = query.lower()
+        return [
+            e.title
+            for e in library.entries()
+            if q in e.title.lower() or q in e.source_filename.lower()
+        ]
+
+    assert len(search("mgt 301")) == 2
+    assert search("aggregate") == ["MGT 301 — Week 4, Aggregate Planning"]
+    assert search("BUS") == ["BUS 390 — Forecasting"]
+    assert search("wk5.mp3") == ["MGT 301 — Week 5, Scheduling"]
+    assert search("nothing here") == []
+
+
+def test_an_unnamed_lecture_still_gets_something_readable(library):
+    """Leaving the name blank must not produce a blank row in the library."""
+    entry = library.save(make_transcript("20260901-111056-sp001.mp3"))
+    assert entry.title.strip()
+    assert "20260901" in entry.title
+
+
+def test_a_name_with_punctuation_round_trips_intact(library):
+    """Em dashes and colons are what real lecture names contain."""
+    name = "MGT 301 — Week 4: chase vs. level (½ session)"
+    entry = library.save(make_transcript(), title=name)
+    assert library.load(entry.id).entry.title == name
+    assert library.entries()[0].title == name
