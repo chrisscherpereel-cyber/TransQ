@@ -35,8 +35,7 @@ TRANSCRIPT SEGMENT:
 SUMMARY_REDUCE_USER = """Below are section summaries of a single lecture, in order. \
 Synthesize them into one coherent overview.
 
-{course_context}
-
+{course_context}{material_clause}{exam_clause}
 Produce JSON with this exact shape:
 {{
   "title": "a descriptive title for the lecture",
@@ -95,7 +94,7 @@ below, which covers {label}.
 
 Cognitive levels to target (distribute across the items): {bloom_targets}
 Difficulty mix: {difficulty_mix}
-{focus_clause}{avoid_clause}
+{focus_clause}{material_clause}{avoid_clause}
 
 Produce JSON with this exact shape:
 {{

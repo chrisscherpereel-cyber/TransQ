@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import Any
 
 from . import prompts
 from .chunking import chunk_transcript
@@ -37,12 +38,47 @@ def summarize_chunk(client: LLMClient, chunk: Chunk, course_context: str = "") -
     return data
 
 
+def _material_block(material: Any) -> str:
+    """The deck's own structure, for the synthesis step.
+
+    Only titles, not full slide text. The reduce call already carries every
+    section summary; adding a whole deck on top is the fastest way to truncate
+    it. Titles are enough to fix terminology and to reveal material the
+    transcript skated over — a slide the instructor put up and barely narrated
+    still belongs in an account of what the lecture covered.
+    """
+    if material is None or not getattr(material, "sections", None):
+        return ""
+    return (
+        f"The instructor's {material.section_noun}s for this lecture, in order. "
+        "Use their wording for technical terms, and treat a topic that appears "
+        "here but is thin in the transcript as covered rather than absent:\n"
+        f"{material.outline()}\n\n"
+    )
+
+
+def _exam_block(exam_topics: list[str] | None) -> str:
+    """What the instructor says will be tested."""
+    topics = [str(t).strip() for t in (exam_topics or []) if str(t).strip()]
+    if not topics:
+        return ""
+    listed = "\n".join(f"- {t}" for t in topics[:20])
+    return (
+        "The instructor will examine these topics. Make sure the learning "
+        "objectives and key points cover them explicitly, using the "
+        "instructor's own wording:\n"
+        f"{listed}\n\n"
+    )
+
+
 def summarize_transcript(
     client: LLMClient,
     transcript: Transcript,
     course_context: str = "",
     chunk_seconds: int = 600,
     overlap_seconds: int = 30,
+    material: Any = None,
+    exam_topics: list[str] | None = None,
     progress: ProgressFn | None = None,
     report: RunReport | None = None,
 ) -> tuple[Summary, list[Chunk], list[dict]]:
@@ -93,7 +129,7 @@ def summarize_transcript(
         progress(0.85, "Synthesizing the overall summary")
 
     try:
-        summary = _reduce(client, sections, course_context)
+        summary = _reduce(client, sections, course_context, material, exam_topics)
         report.record(PHASE_SUMMARY, "overall synthesis", OK)
     except Exception as exc:
         report.record(
@@ -107,7 +143,13 @@ def summarize_transcript(
     return summary, chunks, sections
 
 
-def _reduce(client: LLMClient, sections: list[dict], course_context: str) -> Summary:
+def _reduce(
+    client: LLMClient,
+    sections: list[dict],
+    course_context: str,
+    material: Any = None,
+    exam_topics: list[str] | None = None,
+) -> Summary:
     rendered: list[str] = []
     for s in sections:
         lines = [f"### [{s.get('_label', '')}] {s.get('heading', '')}"]
@@ -122,6 +164,8 @@ def _reduce(client: LLMClient, sections: list[dict], course_context: str) -> Sum
         prompts.SUMMARY_SYSTEM,
         prompts.SUMMARY_REDUCE_USER.format(
             course_context=_course_context_block(course_context),
+            material_clause=_material_block(material),
+            exam_clause=_exam_block(exam_topics),
             sections="\n\n".join(rendered)[:40000],
         ),
         max_tokens=4000,

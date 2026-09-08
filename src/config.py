@@ -169,6 +169,9 @@ LLM_MODELS: dict[str, list[str]] = {k: list(p.models) for k, p in PROVIDERS.item
 
 AUDIO_EXTENSIONS = ["mp3", "wav", "m4a", "mp4", "mpeg", "mpga", "webm", "ogg", "flac", "aac"]
 
+# The lecture's own supporting material: slides, handouts, readings.
+MATERIAL_EXTENSIONS = ["pptx", "pdf", "docx", "txt", "md"]
+
 
 def get_provider(key: str) -> Provider:
     return PROVIDERS.get(key, PROVIDERS[DEFAULT_PROVIDER])
@@ -198,6 +201,10 @@ class AppSettings:
     language: str | None = None  # None = autodetect
     vad_filter: bool = True
     beam_size: int = 1
+
+    # What the instructor says will be examined. Outranks everything the app
+    # infers about importance — see chunking.EXAM_TOPIC_WEIGHT.
+    exam_topics: str = ""
 
     # Generation
     provider: str = DEFAULT_PROVIDER

@@ -13,6 +13,10 @@ google-genai>=1.0.0
 anthropic>=0.40.0
 openai>=1.55.0
 
+# Reading the lecture's own supporting material (slides, handouts)
+python-pptx>=1.0.0
+pypdf>=5.0.0
+
 # Exports
 pandas>=2.2.0
 openpyxl>=3.1.0

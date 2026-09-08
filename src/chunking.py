@@ -107,7 +107,16 @@ def _timestamp_seconds(value: str) -> float | None:
     return seconds
 
 
-def chunk_importance(chunks: list[Chunk], summary: Any) -> list[float]:
+# Topics the instructor says will be tested. Weighted above everything else:
+# the summary is a model's account of what a lecture contained, while this is
+# the instructor's statement of what it was *for*. When they disagree, the
+# instructor is right.
+EXAM_TOPIC_WEIGHT = 4.0
+
+
+def chunk_importance(
+    chunks: list[Chunk], summary: Any, exam_topics: list[str] | None = None
+) -> list[float]:
     """Score each window by how much of the lecture's key material it carries.
 
     The summary already names what mattered — learning objectives, key points,
@@ -125,6 +134,7 @@ def chunk_importance(chunks: list[Chunk], summary: Any) -> list[float]:
     objectives = list(getattr(summary, "learning_objectives", None) or [])
     key_points = list(getattr(summary, "key_points", None) or [])
     outline = list(getattr(summary, "outline", None) or [])
+    topics = [t for t in (exam_topics or []) if str(t).strip()]
 
     scores = [0.0] * len(chunks)
 
@@ -141,7 +151,9 @@ def chunk_importance(chunks: list[Chunk], summary: Any) -> list[float]:
 
     # Objectives count double: what the instructor means to assess outranks
     # what merely came up.
-    for weight, lines in ((2.0, objectives), (1.0, key_points)):
+    for weight, lines in (
+        (EXAM_TOPIC_WEIGHT, topics), (2.0, objectives), (1.0, key_points)
+    ):
         for line in lines:
             wanted = _keywords(str(line))
             if not wanted:
@@ -160,7 +172,10 @@ def chunk_importance(chunks: list[Chunk], summary: Any) -> list[float]:
 
 
 def allocate_by_importance(
-    num_questions: int, chunks: list[Chunk], summary: Any = None
+    num_questions: int,
+    chunks: list[Chunk],
+    summary: Any = None,
+    exam_topics: list[str] | None = None,
 ) -> list[int]:
     """Distribute questions by what matters, not by the clock.
 
@@ -183,7 +198,11 @@ def allocate_by_importance(
     if len(chunks) == 1:
         return [num_questions]
 
-    scores = chunk_importance(chunks, summary) if summary is not None else []
+    scores = (
+        chunk_importance(chunks, summary, exam_topics)
+        if summary is not None or exam_topics
+        else []
+    )
     if not scores or max(scores) <= 0:
         return allocate_questions(num_questions, len(chunks))
 

@@ -73,6 +73,26 @@ def _build_avoid_clause(topics: list[str], stems: list[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _build_exam_clause(exam_topics: list[str]) -> str:
+    """The instructor's own list of what will be tested.
+
+    Ranked above everything else the app infers. The summary is a model's
+    account of what a lecture contained; this is a statement of what it was for,
+    from the person who will write the exam. Where they disagree, this wins.
+    """
+    topics = [str(t).strip() for t in exam_topics if str(t).strip()]
+    if not topics:
+        return ""
+    listed = "\n".join(f"- {t}" for t in topics[:20])
+    return (
+        "THESE TOPICS WILL BE ON THE EXAM. Cover them first and cover them "
+        "well; every one should be represented before you write about anything "
+        "else. If the transcript does not support a question on one of them, "
+        "say nothing about it rather than inventing material:\n"
+        f"{listed}\n\n"
+    )
+
+
 def _build_focus_clause(focus_points: list[str]) -> str:
     """Name what this lecture was for, so "important" is not left to the model.
 
@@ -102,6 +122,8 @@ def generate_questions(
     course_context: str = "",
     avoid_stems: list[str] | None = None,
     focus_points: list[str] | None = None,
+    exam_topics: list[str] | None = None,
+    material: Any = None,
     progress: ProgressFn | None = None,
     report: RunReport | None = None,
 ) -> list[MCQ]:
@@ -122,7 +144,9 @@ def generate_questions(
     )
 
     report = report or RunReport()
-    focus_clause = _build_focus_clause(list(focus_points or []))
+    focus_clause = _build_exam_clause(list(exam_topics or [])) + _build_focus_clause(
+        list(focus_points or [])
+    )
     questions: list[MCQ] = []
     seen_topics: list[str] = []
     prior_stems = list(avoid_stems or [])
@@ -139,6 +163,16 @@ def generate_questions(
 
         avoid = _build_avoid_clause(seen_topics, prior_stems)
 
+        # The slides for *this* window only. The whole deck would crowd out the
+        # transcript and invite questions about material the instructor had not
+        # reached yet in these ten minutes.
+        material_clause = ""
+        if material is not None:
+            from .materials import material_context, relevant_sections
+
+            matched = relevant_sections(chunk.text, material)
+            material_clause = material_context(matched, material.section_noun)
+
         def _ask(n: int, budget: int) -> dict:
             return client.complete_json(
                 prompts.MCQ_SYSTEM.format(n_options=n_options),
@@ -149,6 +183,7 @@ def generate_questions(
                     bloom_targets=", ".join(bloom_targets),
                     difficulty_mix=difficulty_mix,
                     focus_clause=focus_clause,
+                    material_clause=material_clause,
                     avoid_clause=avoid,
                     options_placeholder=options_placeholder,
                     text=_with_inline_timestamps(chunk)[:24000],
@@ -290,6 +325,8 @@ def generate_question_set(
     difficulty_mix: str = "Balanced",
     course_context: str = "",
     summary: Any = None,
+    exam_topics: list[str] | None = None,
+    material: Any = None,
     avoid_stems: list[str] | None = None,
     do_review: bool = True,
     max_rounds: int = 3,
@@ -331,7 +368,12 @@ def generate_question_set(
             *(getattr(summary, "learning_objectives", None) or []),
             *(getattr(summary, "key_points", None) or []),
         ]
-    weights = chunk_importance(chunks, summary) if summary is not None else []
+    topics = [str(t).strip() for t in (exam_topics or []) if str(t).strip()]
+    weights = (
+        chunk_importance(chunks, summary, topics)
+        if summary is not None or topics
+        else []
+    )
 
     common = dict(
         n_options=n_options,
@@ -339,6 +381,8 @@ def generate_question_set(
         difficulty_mix=difficulty_mix,
         course_context=course_context,
         focus_points=focus_points,
+        exam_topics=topics,
+        material=material,
     )
 
     # Questions that already exist in *other* sets for this lecture. Without
@@ -359,7 +403,7 @@ def generate_question_set(
     questions = generate_questions(
         client,
         chunks,
-        allocate_by_importance(target, chunks, summary),
+        allocate_by_importance(target, chunks, summary, topics),
         avoid_stems=existing,
         progress=lambda f, m: _emit(f * 0.5, m),
         report=report,

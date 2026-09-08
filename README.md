@@ -33,7 +33,9 @@ part 3 ─┘    (sequential)       (one timeline)         │
 | Stage | Detail |
 |---|---|
 | **Transcribe** | faster-whisper (CTranslate2), segment timestamps, voice-activity filtering, live progress. Accepts a split recording as several files and stitches them onto one timeline |
-| **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms |
+| **Supporting material** | Optionally upload the lecture's own slides or handout (PPTX, PDF, DOCX, text). Speaker notes are read too. A transcript records what was *said*; the deck restores what was *shown* — the term the audio renders as "this thing here" |
+| **Exam topics** | Optionally list the topics you will actually test. They outrank everything the app infers about importance, steering both where questions are placed and what each request is told to aim at |
+| **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms — informed by the deck's structure and your exam topics when supplied |
 | **Generate** | Questions are placed by **importance, not by the clock**: the summary's objectives and key points decide which parts of the lecture are worth examining, so admin and tangents are quieted and the argument carries the quiz. Each item carries its timestamp and a verbatim supporting quote. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
 | **Review** | An automatic second pass critiques the drafts and repairs or drops weak items |
 | **Validate** | Mechanical checks for "all of the above", duplicate options, giveaway answer length, negative stems, near-duplicate questions, missing provenance |
@@ -604,6 +606,7 @@ lecture-quiz-builder/
 │   ├── openrouter_catalog.py     live model list: fetch, filter, sort, free flags
 │   ├── storage.py                encrypted Store: local files and Dropbox
 │   ├── hostinfo.py               memory ceiling detection and the model guard
+│   ├── materials.py              slides/handouts: extract, match to a window
 │   ├── accounts.py               users, roles, scrypt passwords, saved keys
 │   ├── usage.py                  live meter and the persistent usage ledger
 │   ├── provisioning.py           issue/cap/revoke per-user OpenRouter keys
@@ -643,6 +646,7 @@ lecture-quiz-builder/
     ├── test_question_focus.py       importance-weighted allocation, focus clause
     ├── test_alternative_sets.py     third and fourth sets, cross-set difference
     ├── test_truncation_salvage.py   keeping questions written before a cut-off
+    ├── test_materials.py            real PPTX/PDF/DOCX, matching, exam topics
     ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
     └── test_hostinfo.py             memory detection and the model-fit verdicts
@@ -653,7 +657,7 @@ lecture-quiz-builder/
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 436 tests, no API keys or network needed
+pytest -q          # 461 tests, no API keys or network needed
 ```
 
 ---

@@ -68,6 +68,8 @@ class LibraryEntry:
     has_summary: bool = False
     question_sets: int = 0
     questions: int = 0
+    material_filename: str = ""
+    exam_topics: int = 0
     # Filenames still to transcribe. Non-empty means this lecture was
     # checkpointed partway through a split recording, so the list view can offer
     # to finish it — and, just as importantly, will not present a truncated
@@ -120,6 +122,12 @@ class SavedLecture:
     transcript: Transcript
     summary: Summary | None = None
     quizzes: list[Quiz] = field(default_factory=list)
+    # The slides the lecture was built from, and what the instructor said would
+    # be examined. Saved with the lecture because re-uploading a deck and
+    # retyping a topic list to regenerate one question set is exactly the
+    # friction that stops people regenerating.
+    material: Any = None
+    exam_topics: list[str] = field(default_factory=list)
 
 
 class TranscriptLibrary:
@@ -181,6 +189,8 @@ class TranscriptLibrary:
         quizzes: list[Quiz] | None = None,
         origin: str = "",
         entry_id: str | None = None,
+        material: Any = None,
+        exam_topics: list[str] | None = None,
     ) -> LibraryEntry:
         """Create or replace a saved lecture. Returns its index entry."""
         if transcript is None or not transcript.segments:
@@ -208,6 +218,8 @@ class TranscriptLibrary:
             question_sets=len(quizzes),
             questions=sum(len(q.included) for q in quizzes),
             pending_parts=list(transcript.pending_parts),
+            material_filename=getattr(material, "filename", "") or "",
+            exam_topics=len(exam_topics or []),
         )
 
         # Record first, index second: an index row pointing at nothing is worse
@@ -220,6 +232,8 @@ class TranscriptLibrary:
                 "transcript": transcript.model_dump(),
                 "summary": summary.model_dump() if summary is not None else None,
                 "quizzes": [q.model_dump() for q in quizzes],
+                "material": material.to_dict() if material is not None else None,
+                "exam_topics": list(exam_topics or []),
             },
         )
         self._upsert(entry)
@@ -261,8 +275,24 @@ class TranscriptLibrary:
         except Exception as exc:
             raise LibraryError(f"That saved lecture could not be read back: {exc}") from exc
 
+        material = None
+        if document.get("material"):
+            try:
+                from .materials import Material
+
+                material = Material.from_dict(document["material"])
+            except Exception:  # noqa: BLE001 - a bad deck must not block a reopen
+                material = None
+
         entry = LibraryEntry.from_dict(document.get("entry") or {"id": entry_id, "title": ""})
-        return SavedLecture(entry=entry, transcript=transcript, summary=summary, quizzes=quizzes)
+        return SavedLecture(
+            entry=entry,
+            transcript=transcript,
+            summary=summary,
+            quizzes=quizzes,
+            material=material,
+            exam_topics=list(document.get("exam_topics") or []),
+        )
 
     def delete(self, entry_id: str) -> None:
         self._write_index([e for e in self.entries() if e.id != entry_id])

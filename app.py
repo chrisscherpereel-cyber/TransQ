@@ -35,9 +35,11 @@ from src.accounts import (
 from src.audit import AuditLog
 from src.diagnostics import PHASE_GENERATE, PHASE_SUMMARY, RunReport
 from src.library import LibraryEntry, LibraryError, TranscriptLibrary
+from src.materials import Material, MaterialError, extract_material
 from src.appconfig import AppConfig
 from src.config import (
     AUDIO_EXTENSIONS,
+    MATERIAL_EXTENSIONS,
     DEFAULT_PROVIDER,
     PROVIDERS,
     WHISPER_MODELS,
@@ -178,6 +180,10 @@ def init_state() -> None:
         # the first checkpoint is already filed under a name they will recognise,
         # rather than a recorder's filename like "20260901-111056-sp001".
         "lecture_title": "",
+        # The lecture's own slides/handout, and what the instructor says will be
+        # examined. Both steer the summary and the questions.
+        "material": None,
+        "exam_topics": "",
         # A queued multi-part transcription: one part is done per script run,
         # so this survives between runs. See run_transcription for why.
         "job": None,
@@ -1171,6 +1177,8 @@ def update_saved_lecture(user: User) -> None:
             summary=st.session_state.summary,
             quizzes=list(st.session_state.quiz_versions),
             entry_id=st.session_state.get("library_id"),
+            material=st.session_state.get("material"),
+            exam_topics=examinable_topics(),
         )
         st.session_state.library_id = entry.id
     except (LibraryError, StorageError) as exc:
@@ -1504,6 +1512,8 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             course_context=settings.course_context,
             chunk_seconds=settings.chunk_seconds,
             overlap_seconds=settings.chunk_overlap_seconds,
+            material=st.session_state.get("material"),
+            exam_topics=examinable_topics(),
             progress=lambda f, m: bar.progress(f * 0.35, text=m),
             report=report,
         )
@@ -1519,6 +1529,8 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             difficulty_mix=settings.difficulty_mix,
             course_context=settings.course_context,
             summary=summary,
+            exam_topics=examinable_topics(),
+            material=st.session_state.get("material"),
             do_review=do_review,
             progress=lambda f, m: bar.progress(0.35 + f * 0.65, text=m),
             report=report,
@@ -1614,6 +1626,8 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
             difficulty_mix=settings.difficulty_mix,
             course_context=settings.course_context,
             summary=summary,
+            exam_topics=examinable_topics(),
+            material=st.session_state.get("material"),
             # Every question already written for this lecture, across every set.
             # Without this the "alternative" pass ran blind to the first set and
             # rewrote it, which made a second set look redundant and a third
@@ -1811,6 +1825,91 @@ def resume_panel(settings: AppSettings, user: User) -> bool:
     return True
 
 
+def supporting_material_panel() -> None:
+    """Upload the deck the lecture was built from, and say what will be tested.
+
+    Both feed the same gap. A transcript records what was *said*, and what was
+    said leans on what was on screen — "this framework here", "these three", a
+    table nobody reads aloud. The deck restores the terminology a student
+    actually saw. The exam-topic list restores the other missing half: what the
+    lecture was *for*, which the app can otherwise only infer from a summary
+    that is itself a model's guess.
+    """
+    material = st.session_state.get("material")
+    topics = examinable_topics()
+    label = "📎 Slides & exam topics"
+    if material or topics:
+        bits = []
+        if material:
+            bits.append(
+                f"{material.filename} · {len(material.sections)} "
+                f"{material.section_noun}s"
+            )
+        if topics:
+            bits.append(f"{len(topics)} exam topic(s)")
+        label += " — " + " · ".join(bits)
+
+    with st.expander(label, expanded=not (material or topics)):
+        st.caption(
+            "Both are optional, and both make the questions better: the slides "
+            "give the model the exact wording a student saw, and the exam topics "
+            "tell it what the lecture was for."
+        )
+
+        uploaded = st.file_uploader(
+            "The lecture's slides or handout",
+            type=MATERIAL_EXTENSIONS,
+            help="PowerPoint, PDF, Word, or plain text. Speaker notes are read "
+            "too — they often carry the argument the slide only gestures at.",
+            key="material_upload",
+        )
+        if uploaded is not None and uploaded.name != getattr(
+            material, "filename", None
+        ):
+            try:
+                st.session_state.material = extract_material(
+                    uploaded.name, uploaded.getvalue()
+                )
+                st.rerun()
+            except MaterialError as exc:
+                # A file we cannot read costs the upload, never the lecture.
+                st.warning(str(exc), icon="📎")
+
+        if material:
+            st.success(
+                f"Using **{material.filename}** — {len(material.sections)} "
+                f"{material.section_noun}s, {material.word_count:,} words.",
+                icon="📎",
+            )
+            with st.expander(f"What was read from it", expanded=False):
+                st.text(material.outline())
+            if st.button("Remove this file", key="drop_material"):
+                st.session_state.material = None
+                st.rerun()
+
+        st.text_area(
+            "Key topics that will be tested",
+            key="exam_topics_input",
+            value=st.session_state.get("exam_topics", ""),
+            height=110,
+            placeholder=(
+                "One per line, e.g.\n"
+                "Chase versus level aggregate planning\n"
+                "Cost trade-offs under volatile demand\n"
+                "When a capacity cushion is worth carrying"
+            ),
+            help="These outrank the app's own judgment of what mattered: they "
+            "steer where questions are placed and are named in every request.",
+        )
+        st.session_state.exam_topics = st.session_state.get("exam_topics_input", "")
+
+
+def examinable_topics() -> list[str]:
+    """The exam topics, one per line, blanks dropped."""
+    raw = st.session_state.get("exam_topics", "") or ""
+    return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
 def input_section(settings: AppSettings, user: User, review: bool) -> None:
     # A job in flight owns the screen: showing an upload form underneath an
     # active transcription invites starting a second one on top of the first.
@@ -1821,6 +1920,7 @@ def input_section(settings: AppSettings, user: User, review: bool) -> None:
         st.divider()
 
     lecture_name_field("lecture_title_input")
+    supporting_material_panel()
 
     mode = st.radio(
         "Where is the lecture coming from?",
@@ -2218,6 +2318,8 @@ def library_tab(user: User) -> None:
                 f"{entry.summary_label} · saved {entry.saved_label} · "
                 f"{entry.origin or 'audio'}"
                 + (f" · {entry.source_filename}" if entry.source_filename else "")
+                + (f" · 📎 {entry.material_filename}" if entry.material_filename else "")
+                + (f" · 🎯 {entry.exam_topics} exam topic(s)" if entry.exam_topics else "")
             )
 
             a1, a2 = st.columns(2)
@@ -2278,6 +2380,10 @@ def load_saved_lecture(library: TranscriptLibrary, entry_id: str) -> None:
     st.session_state.transcript_note = saved.entry.origin
     st.session_state.source_filename = saved.entry.source_filename or saved.entry.title
     st.session_state.lecture_title = saved.entry.title
+    # The deck and the exam topics come back too: regenerating a set should
+    # never mean re-uploading slides and retyping a topic list.
+    st.session_state.material = saved.material
+    st.session_state.exam_topics = "\n".join(saved.exam_topics)
     st.session_state.summary = saved.summary
     st.session_state.quiz_versions = list(saved.quizzes)
     st.session_state.quiz = saved.quizzes[-1] if saved.quizzes else None
