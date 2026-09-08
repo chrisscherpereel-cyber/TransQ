@@ -175,6 +175,14 @@ def init_state() -> None:
         "quiz_versions": [],
         "active_version": 0,
         "chunks": [],
+        # Per-window summaries from the most recent attempt, and a fingerprint of
+        # what produced them. A run that dies partway through summarizing has
+        # still bought every window that finished; keeping them here means
+        # pressing the button again resumes instead of re-paying. The fingerprint
+        # is what stops a different lecture, or different window settings, from
+        # silently inheriting them.
+        "summary_sections": [],
+        "summary_sections_key": "",
         "generation_notes": [],
         "run_report": None,
         "library_id": None,
@@ -1511,6 +1519,56 @@ def build_quiz(questions, summary: Summary, settings: AppSettings, version: int)
     )
 
 
+def sections_key(transcript: Transcript, settings: AppSettings) -> str:
+    """Identifies the work a cached set of window summaries belongs to.
+
+    Window labels are timestamps, so summaries from one lecture would happily
+    match the windows of another that happens to run the same length. Reusing
+    them would be the worst kind of bug: silent, plausible, and wrong. So the
+    cache is only honoured when the transcript and the window geometry are the
+    same ones that produced it.
+    """
+    return "|".join(
+        str(x)
+        for x in (
+            len(transcript.segments),
+            round(transcript.duration, 1),
+            transcript.word_count,
+            settings.chunk_seconds,
+            settings.chunk_overlap_seconds,
+        )
+    )
+
+
+def cached_sections_for(transcript: Transcript, settings: AppSettings) -> list[dict]:
+    if st.session_state.get("summary_sections_key") != sections_key(transcript, settings):
+        return []
+    return list(st.session_state.get("summary_sections") or [])
+
+
+def remember_sections(
+    transcript: Transcript, settings: AppSettings, sections: list[dict]
+) -> None:
+    st.session_state.summary_sections = list(sections or [])
+    st.session_state.summary_sections_key = sections_key(transcript, settings)
+
+
+def section_saver(transcript: Transcript, settings: AppSettings, seed: list[dict]):
+    """Keeps the running list of finished windows in session state.
+
+    Called as each window lands rather than at the end, because the run that
+    most needs this is the one that does not reach the end.
+    """
+    running = list(seed)
+    remember_sections(transcript, settings, running)
+
+    def save(section: dict) -> None:
+        running.append(section)
+        remember_sections(transcript, settings, running)
+
+    return save
+
+
 def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
     transcript = st.session_state.transcript
     client = build_client(settings)
@@ -1523,9 +1581,16 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
     report = RunReport()
     st.session_state.run_report = report
 
+    resumable = cached_sections_for(transcript, settings)
+    if resumable:
+        st.caption(
+            f"Resuming: {len(resumable)} window(s) summarized in an earlier "
+            "attempt will be reused rather than requested again."
+        )
+
     bar = st.progress(0.0, text="Summarizing…")
     try:
-        summary, chunks, _ = summarize_transcript(
+        summary, chunks, sections = summarize_transcript(
             client,
             transcript,
             course_context=settings.course_context,
@@ -1533,9 +1598,12 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             overlap_seconds=settings.chunk_overlap_seconds,
             material=st.session_state.get("material"),
             exam_topics=examinable_topics(),
+            cached_sections=resumable,
+            on_section=section_saver(transcript, settings, resumable),
             progress=lambda f, m: bar.progress(f * 0.35, text=m),
             report=report,
         )
+        remember_sections(transcript, settings, sections)
         st.session_state.summary = summary
         st.session_state.chunks = chunks
 
@@ -1563,6 +1631,17 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
     except LLMError as exc:
         bar.empty()
         st.error(f"**The run stopped early.** {exc}", icon="🛑")
+        kept = len(st.session_state.get("summary_sections") or [])
+        if kept:
+            # Nobody presses a button again after an error unless they are told
+            # it will not cost them the same money twice.
+            st.info(
+                f"**Nothing you have already paid for was lost.** {kept} window(s) "
+                "of the lecture were summarized before this stopped, and they are "
+                "still here — pressing **Summarize & generate** again picks up "
+                "from the next one rather than starting over.",
+                icon="↩️",
+            )
         show_run_report(report, expanded=True)
         if report.advice():
             st.info(report.advice(), icon="💡")
@@ -2415,6 +2494,10 @@ def load_saved_lecture(library: TranscriptLibrary, entry_id: str) -> None:
     st.session_state.active_version = max(0, len(saved.quizzes) - 1)
     st.session_state.generation_notes = []
     st.session_state.run_report = None
+    # A different lecture is a different set of windows. The fingerprint would
+    # reject these anyway; dropping them keeps the resume caption honest.
+    st.session_state.summary_sections = []
+    st.session_state.summary_sections_key = ""
     st.session_state.library_id = entry_id
 
     # Chunks are cheap to rebuild and are what the regenerate and replace

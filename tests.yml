@@ -1,0 +1,29 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test dependencies
+        # The Whisper and LLM SDKs are not needed for the unit tests, which
+        # cover schema, validation, and exporters only.
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest pydantic pandas openpyxl XlsxWriter python-docx reportlab tenacity
+
+      - name: Run tests
+        run: pytest -q
+
+      - name: Byte-compile the app
+        run: python -m compileall -q app.py src

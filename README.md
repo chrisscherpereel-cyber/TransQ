@@ -35,7 +35,7 @@ part 3 ─┘    (sequential)       (one timeline)         │
 | **Transcribe** | faster-whisper (CTranslate2), segment timestamps, voice-activity filtering, live progress. Accepts a split recording as several files and stitches them onto one timeline |
 | **Supporting material** | Optionally upload the lecture's own slides or handout (PPTX, PDF, DOCX, text). Speaker notes are read too. A transcript records what was *said*; the deck restores what was *shown* — the term the audio renders as "this thing here" |
 | **Exam topics** | Optionally list the topics you will actually test. They outrank everything the app infers about importance, steering both where questions are placed and what each request is told to aim at |
-| **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms — informed by the deck's structure and your exam topics when supplied |
+| **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms — informed by the deck's structure and your exam topics when supplied. **Resumable**: every window that finishes is kept, so a run that fails partway carries on from the next one instead of starting over and charging twice |
 | **Generate** | Questions are placed by **importance, not by the clock**: the summary's objectives and key points decide which parts of the lecture are worth examining, so admin and tangents are quieted and the argument carries the quiz. Each item carries its timestamp and a verbatim supporting quote. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
 | **Wording** | Choose how stems are framed: **standalone** (default — asks the question directly, no "according to the lecture", reusable across a whole unit), reference the lecture, or an applied scenario. Provenance is unaffected: the timestamp and supporting quote are still recorded on every item |
 | **Review** | An automatic second pass critiques the drafts and repairs or drops weak items |
@@ -682,6 +682,7 @@ lecture-quiz-builder/
     ├── test_framing_and_review.py   stem wording, and the review's honesty
     ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
+    ├── test_summary_resume.py       resuming a summary, salvage, local fallback
     └── test_hostinfo.py             memory detection and the model-fit verdicts
 ```
 
@@ -690,7 +691,7 @@ lecture-quiz-builder/
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 495 tests, no API keys or network needed
+pytest -q          # 512 tests, no API keys or network needed
 ```
 
 ---
