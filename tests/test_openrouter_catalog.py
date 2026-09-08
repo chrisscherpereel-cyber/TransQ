@@ -280,9 +280,13 @@ def test_fallback_contains_the_default_model():
 
 
 def test_fallback_never_labels_a_paid_model_free():
+    """In the snapshot, "free" is trusted only from the `:free` suffix, because
+    real prices were not captured — guessing $0 from a missing figure would
+    understate spend. `openrouter/free` is the one documented exception: it is a
+    router over free models only, free by definition rather than by suffix."""
     for model in FALLBACK_MODELS:
         if model.is_free:
-            assert model.id.endswith(":free")
+            assert model.id.endswith(":free") or model.id == FREE_ROUTER_ID
 
 
 # --------------------------------------------------------------------------- #
@@ -308,3 +312,83 @@ def test_registering_the_catalog_makes_new_slugs_priceable(payload):
     register_pricing(pricing_map(parse_models(payload)))
     assert has_pricing(slug)
     PRICING.pop(slug, None)
+
+
+# --------------------------------------------------------------------------- #
+# The free router is the default, so it must always be offerable
+# --------------------------------------------------------------------------- #
+#
+# `openrouter/free` is a router rather than a model, so it does not reliably
+# appear in /api/v1/models. Since it is what a new account starts on, a picker
+# that could not list it would open on an option it does not contain.
+
+
+from src.config import DEFAULT_PROVIDER, FREE_ROUTER, PROVIDERS  # noqa: E402
+from src.openrouter_catalog import FREE_ROUTER_ID, parse_models  # noqa: E402
+
+
+def test_the_shipped_default_is_the_free_router():
+    assert PROVIDERS[DEFAULT_PROVIDER].models[0] == FREE_ROUTER
+    assert FREE_ROUTER == FREE_ROUTER_ID
+
+
+def test_parse_models_reports_the_api_verbatim_without_the_router():
+    """Parsing must not invent entries: an empty response has to stay
+    recognisable as a failure rather than arriving as a one-model catalog."""
+    models = parse_models(
+        {
+            "data": [
+                {
+                    "id": "deepseek/deepseek-r1",
+                    "name": "R1",
+                    "context_length": 64000,
+                    "pricing": {"prompt": "0.000001", "completion": "0.000002"},
+                }
+            ]
+        }
+    )
+    assert [m.id for m in models] == ["deepseek/deepseek-r1"]
+
+
+def test_the_free_router_is_added_when_the_api_omits_it(monkeypatch):
+    import src.openrouter_catalog as cat
+
+    monkeypatch.setattr(
+        cat, "fetch_models", lambda timeout=None: [
+            m for m in FALLBACK_MODELS if m.id != FREE_ROUTER_ID
+        ]
+    )
+    models, warning = cat.load_models()
+    assert warning is None
+    router = next(m for m in models if m.id == FREE_ROUTER_ID)
+    assert router.is_free
+    assert router.price_label == "free"
+    assert router.price_known, "an unpriced router would show as 'price unknown'"
+
+
+def test_the_free_router_is_not_duplicated_when_the_api_lists_it(monkeypatch):
+    import src.openrouter_catalog as cat
+
+    monkeypatch.setattr(cat, "fetch_models", lambda timeout=None: list(FALLBACK_MODELS))
+    models, _ = cat.load_models()
+    assert [m.id for m in models].count(FREE_ROUTER_ID) == 1
+
+
+def test_adding_the_router_keeps_the_list_alphabetical(monkeypatch):
+    import src.openrouter_catalog as cat
+
+    monkeypatch.setattr(
+        cat, "fetch_models",
+        lambda timeout=None: parse_models({
+            "data": [
+                {"id": "zzz/last", "name": "Z", "context_length": 1,
+                 "pricing": {"prompt": "0.001", "completion": "0.001"}},
+                {"id": "aaa/first", "name": "A", "context_length": 1,
+                 "pricing": {"prompt": "0.001", "completion": "0.001"}},
+            ]
+        }),
+    )
+    models, _ = cat.load_models()
+    slugs = [m.id for m in models]
+    assert slugs == sorted(slugs, key=lambda s: s.lstrip("~").lower())
+    assert FREE_ROUTER_ID in slugs

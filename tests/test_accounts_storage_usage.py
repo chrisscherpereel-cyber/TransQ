@@ -535,3 +535,67 @@ def test_client_reports_every_call_to_the_meter(monkeypatch):
     assert meter.total_tokens == 2000
     assert meter.cost > 0, "a priced model should accumulate cost live"
     assert meter.total_tokens == client.usage.input_tokens + client.usage.output_tokens
+
+
+# --------------------------------------------------------------------------- #
+# The model you last used is the one you come back to
+# --------------------------------------------------------------------------- #
+#
+# The sidebar has always *read* a saved provider and model, but nothing wrote
+# them unless you found the "Save these settings" button — so every sign-in put
+# you back on the shipped default. The write now happens on use.
+
+
+def test_the_provider_and_model_last_used_survive_a_restart(tmp_path):
+    from src.config import DEFAULT_PROVIDER, PROVIDERS
+
+    store, _ = build_store({"APP_SECRET": SECRET, "DATA_DIR": str(tmp_path)})
+    directory = UserDirectory(store, Cipher(SECRET))
+    directory.create_user("chris", "a-good-long-password", role="admin")
+
+    # Nothing saved yet: a new account starts on the shipped default.
+    user = directory.get("chris")
+    assert user.settings.get("provider", DEFAULT_PROVIDER) == DEFAULT_PROVIDER
+    assert (
+        user.settings.get("llm_model", PROVIDERS[DEFAULT_PROVIDER].models[0])
+        == "openrouter/free"
+    )
+
+    directory.save_settings(
+        "chris", {"provider": "openrouter", "llm_model": "deepseek/deepseek-r1"}
+    )
+
+    # A fresh process, as after a sign-out or a restart.
+    reopened, _ = build_store({"APP_SECRET": SECRET, "DATA_DIR": str(tmp_path)})
+    later = UserDirectory(reopened, Cipher(SECRET)).get("chris")
+    assert later.settings["llm_model"] == "deepseek/deepseek-r1"
+    assert later.settings["provider"] == "openrouter"
+
+
+def test_saving_the_model_leaves_other_settings_alone(tmp_path):
+    """Recording a model on use must not quietly reset question count or Bloom
+    levels — it runs after every generation."""
+    store, _ = build_store({"APP_SECRET": SECRET, "DATA_DIR": str(tmp_path)})
+    directory = UserDirectory(store, Cipher(SECRET))
+    directory.create_user("chris", "a-good-long-password")
+
+    directory.save_settings("chris", {"num_questions": 25, "whisper_model": "base"})
+    directory.save_settings("chris", {"llm_model": "x-ai/grok-4.6"})
+
+    settings = directory.get("chris").settings
+    assert settings["llm_model"] == "x-ai/grok-4.6"
+    assert settings["num_questions"] == 25
+    assert settings["whisper_model"] == "base"
+
+
+def test_each_account_remembers_its_own_model(tmp_path):
+    store, _ = build_store({"APP_SECRET": SECRET, "DATA_DIR": str(tmp_path)})
+    directory = UserDirectory(store, Cipher(SECRET))
+    directory.create_user("chris", "a-good-long-password")
+    directory.create_user("jsmith", "another-good-password")
+
+    directory.save_settings("chris", {"llm_model": "deepseek/deepseek-r1"})
+    directory.save_settings("jsmith", {"llm_model": "openrouter/free"})
+
+    assert directory.get("chris").settings["llm_model"] == "deepseek/deepseek-r1"
+    assert directory.get("jsmith").settings["llm_model"] == "openrouter/free"

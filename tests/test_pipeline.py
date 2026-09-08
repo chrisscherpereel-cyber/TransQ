@@ -115,11 +115,15 @@ def test_transcript_text_and_slice(transcript):
 # --------------------------------------------------------------------------- #
 
 
-def test_openrouter_deepseek_is_the_default():
+def test_the_free_router_is_the_default_model():
+    """A new account should cost nothing to try. `openrouter/free` routes each
+    request to a capable free model, so the app works on a fresh OpenRouter key
+    with no billing set up — at the cost of a different model per call, which is
+    why anyone who settles on one has it remembered instead."""
     assert DEFAULT_PROVIDER == "openrouter"
     assert list(PROVIDERS)[0] == "openrouter", "default should be first in the sidebar"
     assert AppSettings().provider == "openrouter"
-    assert AppSettings().llm_model == "deepseek/deepseek-v4-pro"
+    assert AppSettings().llm_model == "openrouter/free"
     assert AppSettings().llm_model in PROVIDERS["openrouter"].models
 
 

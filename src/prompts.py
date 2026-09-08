@@ -76,6 +76,14 @@ CONTENT
 - Every item must be answerable from the transcript alone. Do not test outside material.
 - Test understanding of ideas, not recall of the instructor's exact phrasing or trivia \
 like dates mentioned in passing.
+- Write about what the lecture was *for*: the central arguments, distinctions, \
+trade-offs and methods a student must hold to have understood it. Course logistics, \
+anecdotes, asides, and passing examples are not assessable content, however much time \
+they took up.
+- Quality over quota. If this segment cannot support the number of good items \
+requested, write fewer excellent ones rather than padding with trivia. A short set of \
+items worth asking is the goal; questions written to fill a number are worse than no \
+question at all.
 - Each item must include the transcript timestamp it came from and a short verbatim \
 quote that supports the correct answer. If you cannot supply a supporting quote, do not \
 write the item."""
@@ -87,7 +95,7 @@ below, which covers {label}.
 
 Cognitive levels to target (distribute across the items): {bloom_targets}
 Difficulty mix: {difficulty_mix}
-{avoid_clause}
+{focus_clause}{avoid_clause}
 
 Produce JSON with this exact shape:
 {{

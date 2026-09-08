@@ -6,8 +6,9 @@ reviewable bank of multiple-choice questions you can import straight into Canvas
 
 Transcription runs **locally** with faster-whisper, so audio never leaves the
 server. Only the transcript text is sent to an LLM, and only for summarizing and
-question writing — DeepSeek via OpenRouter by default, or Gemini, Claude,
-OpenAI, Grok, or any other model OpenRouter carries.
+question writing — free of charge by default, via OpenRouter's Free Models
+Router, or Gemini, Claude, DeepSeek, OpenAI, Grok, or any other model OpenRouter
+carries.
 
 Long recordings can be uploaded **in parts**: split a 90-minute lecture into
 three files and they are transcribed in order, then stitched into one continuous
@@ -33,7 +34,7 @@ part 3 ─┘    (sequential)       (one timeline)         │
 |---|---|
 | **Transcribe** | faster-whisper (CTranslate2), segment timestamps, voice-activity filtering, live progress. Accepts a split recording as several files and stitches them onto one timeline |
 | **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms |
-| **Generate** | Questions written per chunk with Bloom-level and difficulty targets, each carrying the timestamp and a verbatim quote that supports the answer. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
+| **Generate** | Questions are placed by **importance, not by the clock**: the summary's objectives and key points decide which parts of the lecture are worth examining, so admin and tangents are quieted and the argument carries the quiz. Each item carries its timestamp and a verbatim supporting quote. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
 | **Review** | An automatic second pass critiques the drafts and repairs or drops weak items |
 | **Validate** | Mechanical checks for "all of the above", duplicate options, giveaway answer length, negative stems, near-duplicate questions, missing provenance |
 | **Balance** | Correct answers are redistributed across A/B/C/D — LLMs have a strong positional bias students notice fast |
@@ -154,11 +155,28 @@ Prompts live in `src/prompts.py` and are meant to be edited for your discipline.
 
 | Provider | Key | Where to get one | Notes |
 |---|---|---|---|
-| **OpenRouter** *(default)* | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key, every model — the full catalog is fetched live and listed A–Z, free models marked |
+| **OpenRouter** *(default)* | `OPENROUTER_API_KEY` | [openrouter.ai/keys](https://openrouter.ai/keys) | One key, every model — the full catalog is fetched live and listed A–Z, free models marked. Starts on `openrouter/free` |
 | Google Gemini | `GEMINI_API_KEY` | [aistudio.google.com/apikey](https://aistudio.google.com/apikey) | Free tier covers light use |
 | Anthropic Claude | `ANTHROPIC_API_KEY` | [console.anthropic.com](https://console.anthropic.com/settings/keys) | Best at following the item-writing rules |
 | OpenAI | `OPENAI_API_KEY` | [platform.openai.com](https://platform.openai.com/api-keys) | |
 | xAI Grok | `XAI_API_KEY` | [console.x.ai](https://console.x.ai) | OpenAI-compatible endpoint |
+
+#### Starting free, and staying on what you choose
+
+The default model is **`openrouter/free`**, OpenRouter's Free Models Router: it
+reads each request, filters to free models that can serve it, and picks one. So
+the app works on a fresh OpenRouter key with no billing set up, and the list
+never goes stale as free models come and go.
+
+The trade-offs are real and not visible in the price. Free models have lower
+rate limits and higher latency at busy times, availability varies, and — the one
+that matters most here — **a different model may answer each call**, so two runs
+over the same lecture can differ in quality in a way a pinned model's do not.
+Fine for drafting; pin a specific model when a particular set matters.
+
+Whatever you last generated with becomes your starting point next time you sign
+in, per account. That is recorded on *use*, not on selection, so browsing the
+model list does not change what you come back to.
 
 #### The OpenRouter model list
 
@@ -622,6 +640,7 @@ lecture-quiz-builder/
     ├── test_security_hardening.py   crypto, envelope encryption, lockout, audit
     ├── test_failure_reporting.py    truncation, rate limits, silent-failure guards
     ├── test_library.py              save/load round-trips, per-account isolation
+    ├── test_question_focus.py       importance-weighted allocation, focus clause
     ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
     └── test_hostinfo.py             memory detection and the model-fit verdicts
@@ -632,7 +651,7 @@ lecture-quiz-builder/
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 378 tests, no API keys or network needed
+pytest -q          # 411 tests, no API keys or network needed
 ```
 
 ---

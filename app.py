@@ -976,6 +976,36 @@ def security_panel(directory: UserDirectory, user: User) -> None:
                     st.error(str(exc))
 
 
+def remember_model_used(user: User, s: AppSettings) -> None:
+    """Make the model you just used the one you start on next time.
+
+    The sidebar already reads a saved provider and model — but nothing wrote
+    them unless you noticed the "Save these settings" button and pressed it. So
+    the app forgot your model on every sign-in and put you back on the shipped
+    default, which is a poor answer for anyone who has settled on one.
+
+    Recorded on *use*, not on selection: browsing the OpenRouter list should not
+    change what you come back to, while generating a set with a model is a real
+    choice. Writes only when something changed, since this runs after every
+    generation and each write is a round trip to storage.
+    """
+    if (
+        preference(user, "llm_model", None) == s.llm_model
+        and preference(user, "provider", None) == s.provider
+    ):
+        return
+    try:
+        _, directory, _, _, _, _ = get_backend()
+        directory.save_settings(
+            user.username, {"provider": s.provider, "llm_model": s.llm_model}
+        )
+        user.settings.update({"provider": s.provider, "llm_model": s.llm_model})
+    except (AuthError, StorageError):
+        # A preference that failed to save is not worth interrupting a finished
+        # run over — the questions are already generated and on screen.
+        pass
+
+
 def save_settings(directory: UserDirectory, user: User, s: AppSettings) -> None:
     try:
         directory.save_settings(
@@ -1488,6 +1518,7 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             bloom_targets=settings.bloom_targets,
             difficulty_mix=settings.difficulty_mix,
             course_context=settings.course_context,
+            summary=summary,
             do_review=do_review,
             progress=lambda f, m: bar.progress(0.35 + f * 0.65, text=m),
             report=report,
@@ -1505,6 +1536,7 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             st.info(report.advice(), icon="💡")
     finally:
         commit_usage(meter, user, "generate")
+        remember_model_used(user, settings)
 
 
 def report_outcome(report: RunReport, questions, notes, settings: AppSettings) -> None:
@@ -1581,6 +1613,7 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
             bloom_targets=settings.bloom_targets,
             difficulty_mix=settings.difficulty_mix,
             course_context=settings.course_context,
+            summary=summary,
             do_review=do_review,
             progress=lambda f, m: bar.progress(f, text=m),
             report=report,
@@ -1612,6 +1645,7 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
         return False
     finally:
         commit_usage(meter, user, "alternative")
+        remember_model_used(user, settings)
 
 
 def run_replacement(

@@ -74,6 +74,18 @@ class Provider:
     note: str = ""
 
 
+# OpenRouter's Free Models Router. It reads each request, filters to free models
+# that can serve it, and picks one at random — so it costs nothing and never
+# goes stale as free models come and go.
+#
+# The trade-offs are real and worth stating, because they are not obvious from
+# the price: lower rate limits, higher latency at peak, availability that varies,
+# and a *different model per call*, so two runs over the same lecture can differ
+# in quality in a way a pinned model's do not. Good for drafting and for anyone
+# without a paid key; pin a model when a particular set matters.
+FREE_ROUTER = "openrouter/free"
+
+
 PROVIDERS: dict[str, Provider] = {
     "openrouter": Provider(
         key="openrouter",
@@ -81,6 +93,7 @@ PROVIDERS: dict[str, Provider] = {
         sdk="openai",
         env_var="OPENROUTER_API_KEY",
         models=(
+            FREE_ROUTER,
             "deepseek/deepseek-v4-pro",
             "deepseek/deepseek-v4-flash",
             "deepseek/deepseek-v3.2",

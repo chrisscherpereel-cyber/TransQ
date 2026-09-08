@@ -143,6 +143,32 @@ def parse_models(payload: dict) -> list[ORModel]:
     return models
 
 
+# The Free Models Router. It is a router rather than a model, so it does not
+# reliably appear in /api/v1/models — and it is what a new account starts on,
+# which would leave the picker opening on an option it does not contain.
+#
+# Guaranteed in ``load_models`` rather than in ``parse_models`` on purpose:
+# parsing reports exactly what OpenRouter returned, and an empty response has to
+# stay recognisable as a failure. Deciding what the picker should offer is a
+# separate job from reading the API.
+FREE_ROUTER_ID = "openrouter/free"
+
+
+def _with_free_router(models: list[ORModel]) -> list[ORModel]:
+    if any(m.id == FREE_ROUTER_ID for m in models):
+        return models
+    router = ORModel(
+        id=FREE_ROUTER_ID,
+        name="Free Models Router — picks a capable free model per request",
+        context_length=0,
+        prompt_per_m=0.0,
+        completion_per_m=0.0,
+        is_free=True,
+        price_known=True,
+    )
+    return sorted([*models, router], key=lambda m: m.id.lstrip("~").lower())
+
+
 # --------------------------------------------------------------------------- #
 # Fetching
 # --------------------------------------------------------------------------- #
@@ -178,7 +204,7 @@ def load_models(timeout: int = REQUEST_TIMEOUT) -> tuple[list[ORModel], str | No
     rather than silently showing a stale list as if it were current.
     """
     try:
-        return fetch_models(timeout=timeout), None
+        return _with_free_router(fetch_models(timeout=timeout)), None
     except CatalogError as exc:
         return list(FALLBACK_MODELS), (
             f"{exc} Showing a bundled snapshot instead — it may be out of date, "
@@ -278,3 +304,5 @@ FALLBACK_MODELS: tuple[ORModel, ...] = tuple(
         key=lambda m: m.id.lstrip("~").lower(),
     )
 )
+
+FALLBACK_MODELS = tuple(_with_free_router(list(FALLBACK_MODELS)))

@@ -63,6 +63,10 @@ class Usage:
 # which is the honest answer rather than a fabricated one.
 PRICING: dict[str, tuple[float, float]] = {
     # OpenRouter (approximate — see note above)
+    # The Free Models Router only ever routes to free models, so this is an
+    # exact zero rather than an estimate — and listing it explicitly is what
+    # makes the meter read "$0.00" instead of "no published price".
+    "openrouter/free": (0.0, 0.0),
     "deepseek/deepseek-v4-pro": (0.87, 1.74),
     "deepseek/deepseek-v4-flash": (0.07, 0.17),
     "deepseek/deepseek-v3.2": (0.21, 0.31),

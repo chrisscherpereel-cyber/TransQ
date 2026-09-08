@@ -15,9 +15,10 @@ import random
 import re
 from collections import Counter
 from collections.abc import Callable
+from typing import Any
 
 from . import prompts
-from .chunking import allocate_questions
+from .chunking import allocate_by_importance, chunk_importance
 from .diagnostics import (
     EMPTY,
     FAILED,
@@ -67,6 +68,25 @@ def _build_avoid_clause(topics: list[str], stems: list[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _build_focus_clause(focus_points: list[str]) -> str:
+    """Name what this lecture was for, so "important" is not left to the model.
+
+    Without it, each chunk is judged on its own and the model has no way to know
+    that the segment it is reading is a digression. The summary already worked
+    this out for the whole lecture; passing it down is what makes a per-chunk
+    call aim at the lecture's actual argument.
+    """
+    points = [str(p).strip() for p in focus_points if str(p).strip()]
+    if not points:
+        return ""
+    listed = "\n".join(f"- {p}" for p in points[:12])
+    return (
+        "This lecture is meant to teach the following. Prioritise items that "
+        "assess these; write nothing that merely fills a count:\n"
+        f"{listed}\n\n"
+    )
+
+
 def generate_questions(
     client: LLMClient,
     chunks: list[Chunk],
@@ -76,6 +96,7 @@ def generate_questions(
     difficulty_mix: str = "Balanced",
     course_context: str = "",
     avoid_stems: list[str] | None = None,
+    focus_points: list[str] | None = None,
     progress: ProgressFn | None = None,
     report: RunReport | None = None,
 ) -> list[MCQ]:
@@ -96,6 +117,7 @@ def generate_questions(
     )
 
     report = report or RunReport()
+    focus_clause = _build_focus_clause(list(focus_points or []))
     questions: list[MCQ] = []
     seen_topics: list[str] = []
     prior_stems = list(avoid_stems or [])
@@ -121,6 +143,7 @@ def generate_questions(
                     course_context=context_block,
                     bloom_targets=", ".join(bloom_targets),
                     difficulty_mix=difficulty_mix,
+                    focus_clause=focus_clause,
                     avoid_clause=avoid,
                     options_placeholder=options_placeholder,
                     text=_with_inline_timestamps(chunk)[:24000],
@@ -180,16 +203,32 @@ def generate_questions(
     return questions
 
 
-def _allocate_topup(shortfall: int, chunks: list[Chunk], offset: int) -> list[int]:
-    """Spread a shortfall round-robin, starting where the last round stopped.
+def _allocate_topup(
+    shortfall: int, chunks: list[Chunk], offset: int, weights: list[float] | None = None
+) -> list[int]:
+    """Spread a shortfall round-robin over the chunks worth asking about.
 
     Rotating the starting point matters: always restarting at chunk 0 would make
     every top-up round hammer the opening minutes of the lecture, which is
     exactly the part already best covered.
+
+    When importance weights are known, the rotation runs over the substantial
+    windows only. Otherwise a lecture whose good material is in the middle gets
+    topped up from its admin and its Q&A, which is where the padding used to
+    come from.
     """
+    if not chunks:
+        return []
+    eligible = list(range(len(chunks)))
+    if weights and max(weights) > 0:
+        threshold = max(weights) * 0.25
+        preferred = [i for i, w in enumerate(weights) if w >= threshold]
+        if preferred:
+            eligible = preferred
+
     counts = [0] * len(chunks)
     for i in range(shortfall):
-        counts[(offset + i) % len(chunks)] += 1
+        counts[eligible[(offset + i) % len(eligible)]] += 1
     return counts
 
 
@@ -201,6 +240,7 @@ def generate_question_set(
     bloom_targets: list[str] | None = None,
     difficulty_mix: str = "Balanced",
     course_context: str = "",
+    summary: Any = None,
     do_review: bool = True,
     max_rounds: int = 3,
     progress: ProgressFn | None = None,
@@ -231,11 +271,24 @@ def generate_question_set(
         return [], notes
 
     bloom_targets = bloom_targets or ["Remember", "Understand", "Apply", "Analyze"]
+
+    # What the lecture was for, in the summary's own words. Drives both where
+    # questions are placed and what each call is told to aim at, so the quiz
+    # follows the argument rather than the clock.
+    focus_points = []
+    if summary is not None:
+        focus_points = [
+            *(getattr(summary, "learning_objectives", None) or []),
+            *(getattr(summary, "key_points", None) or []),
+        ]
+    weights = chunk_importance(chunks, summary) if summary is not None else []
+
     common = dict(
         n_options=n_options,
         bloom_targets=bloom_targets,
         difficulty_mix=difficulty_mix,
         course_context=course_context,
+        focus_points=focus_points,
     )
 
     questions: list[MCQ] = []
@@ -249,7 +302,7 @@ def generate_question_set(
     questions = generate_questions(
         client,
         chunks,
-        allocate_questions(target, len(chunks)),
+        allocate_by_importance(target, chunks, summary),
         avoid_stems=[],
         progress=lambda f, m: _emit(f * 0.5, m),
         report=report,
@@ -278,7 +331,7 @@ def generate_question_set(
         extra = generate_questions(
             client,
             chunks,
-            _allocate_topup(shortfall, chunks, rotation),
+            _allocate_topup(shortfall, chunks, rotation, weights),
             avoid_stems=[q.stem for q in questions],
             report=report,
             **common,
@@ -315,7 +368,7 @@ def generate_question_set(
             replacements = generate_questions(
                 client,
                 chunks,
-                _allocate_topup(need, chunks, rotation),
+                _allocate_topup(need, chunks, rotation, weights),
                 avoid_stems=[q.stem for q in questions],
                 report=report,
                 **common,
