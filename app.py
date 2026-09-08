@@ -34,12 +34,15 @@ from src.accounts import (
 )
 from src.audit import AuditLog
 from src.diagnostics import PHASE_GENERATE, PHASE_SUMMARY, RunReport
+from src.factcheck import ReviewResult, review_transcript
 from src.library import LibraryEntry, LibraryError, TranscriptLibrary
 from src.materials import Material, MaterialError, extract_material
 from src.appconfig import AppConfig
 from src.config import (
     AUDIO_EXTENSIONS,
+    DEFAULT_FRAMING,
     MATERIAL_EXTENSIONS,
+    QUESTION_FRAMING,
     DEFAULT_PROVIDER,
     PROVIDERS,
     WHISPER_MODELS,
@@ -184,6 +187,8 @@ def init_state() -> None:
         # examined. Both steer the summary and the questions.
         "material": None,
         "exam_topics": "",
+        # The consistency review, when one has been run for this lecture.
+        "review_result": None,
         # A queued multi-part transcription: one part is done per script run,
         # so this survives between runs. See run_transcription for why.
         "job": None,
@@ -767,6 +772,18 @@ def sidebar(directory: UserDirectory, user: User) -> AppSettings:
 
             s.api_key = account_key_controls(directory, user, s.provider)
 
+            framing_keys = list(QUESTION_FRAMING)
+            saved_framing = preference(user, "framing", DEFAULT_FRAMING)
+            s.framing = st.selectbox(
+                "How questions are worded",
+                framing_keys,
+                index=framing_keys.index(saved_framing)
+                if saved_framing in framing_keys
+                else framing_keys.index(DEFAULT_FRAMING),
+                format_func=lambda k: QUESTION_FRAMING[k]["label"],
+            )
+            st.caption(QUESTION_FRAMING[s.framing]["help"])
+
             s.num_questions = st.slider(
                 "Number of questions", 3, 40, int(preference(user, "num_questions", 10))
             )
@@ -1025,6 +1042,7 @@ def save_settings(directory: UserDirectory, user: User, s: AppSettings) -> None:
                 "bloom_targets": s.bloom_targets,
                 "difficulty_mix": s.difficulty_mix,
                 "course_context": s.course_context,
+                "framing": s.framing,
             },
         )
         st.session_state.user = directory.get(user.username)
@@ -1179,6 +1197,7 @@ def update_saved_lecture(user: User) -> None:
             entry_id=st.session_state.get("library_id"),
             material=st.session_state.get("material"),
             exam_topics=examinable_topics(),
+            review=st.session_state.get("review_result"),
         )
         st.session_state.library_id = entry.id
     except (LibraryError, StorageError) as exc:
@@ -1531,6 +1550,7 @@ def run_generation(settings: AppSettings, user: User, do_review: bool) -> None:
             summary=summary,
             exam_topics=examinable_topics(),
             material=st.session_state.get("material"),
+            framing=settings.framing,
             do_review=do_review,
             progress=lambda f, m: bar.progress(0.35 + f * 0.65, text=m),
             report=report,
@@ -1628,6 +1648,7 @@ def run_alternative_set(settings: AppSettings, user: User, do_review: bool) -> b
             summary=summary,
             exam_topics=examinable_topics(),
             material=st.session_state.get("material"),
+            framing=settings.framing,
             # Every question already written for this lecture, across every set.
             # Without this the "alternative" pass ran blind to the first set and
             # rewrote it, which made a second set look redundant and a third
@@ -1698,6 +1719,9 @@ def run_replacement(
                 difficulty_mix=settings.difficulty_mix,
                 course_context=settings.course_context,
                 same_section=same_section,
+                framing=settings.framing,
+                exam_topics=examinable_topics(),
+                material=st.session_state.get("material"),
                 report=report,
             )
     except LLMError as exc:
@@ -2384,6 +2408,7 @@ def load_saved_lecture(library: TranscriptLibrary, entry_id: str) -> None:
     # never mean re-uploading slides and retyping a topic list.
     st.session_state.material = saved.material
     st.session_state.exam_topics = "\n".join(saved.exam_topics)
+    st.session_state.review_result = saved.review
     st.session_state.summary = saved.summary
     st.session_state.quiz_versions = list(saved.quizzes)
     st.session_state.quiz = saved.quizzes[-1] if saved.quizzes else None
@@ -2397,6 +2422,152 @@ def load_saved_lecture(library: TranscriptLibrary, entry_id: str) -> None:
     st.session_state.chunks = chunk_transcript(saved.transcript, 600, 30)
 
     st.toast(f"Opened {saved.entry.title}.", icon="📂")
+    st.rerun()
+
+
+def review_tab(settings: AppSettings, user: User) -> None:
+    """Claims worth a second look, with the app's authority stated honestly.
+
+    The framing here is load-bearing, not decoration. A model assessing claims
+    from its own training is wrong often enough that presenting this as
+    fact-checking would spend the instructor's trust on noise — and the first
+    confident wrong flag is the one that makes them stop reading. So the tab
+    says what each signal is worth, sorts the reliable half first, and never
+    uses the word "incorrect" about the lecture.
+    """
+    transcript = st.session_state.transcript
+    if transcript is None:
+        st.info("Transcribe or open a lecture first.")
+        return
+
+    result = st.session_state.get("review_result")
+
+    st.caption(
+        "A second reader for your lecture. It flags claims you might want to "
+        "check again before students are examined on them — it does **not** "
+        "verify them, and it is not the authority here."
+    )
+
+    material = st.session_state.get("material")
+    with st.container(border=True):
+        st.markdown("**What this can and cannot tell you**")
+        st.markdown(
+            "- **Against your slides** — reliable. Both texts are in front of "
+            "the model, so \"the transcript says 40% and slide 7 says 14%\" is a "
+            "real observation."
+            + ("" if material else " *(No slides uploaded, so this half is off.)*")
+            + "\n- **Against general knowledge** — advisory only. The model's "
+            "training has a cutoff, uneven coverage, and a real rate of confident "
+            "error. Useful for \"this was superseded around 2019\"; unreliable "
+            "for anything niche, recent, or specific to your course."
+            "\n- **Transcription errors** are reported separately, because most "
+            "claims that look wrong in an automatic transcript are Whisper "
+            "mishearing a number or a term — not you."
+        )
+
+    if st.button(
+        "🔍 Review this lecture", type="primary", use_container_width=False
+    ):
+        run_consistency_review(settings, user)
+
+    if result is None:
+        return
+
+    st.divider()
+    st.markdown(f"**{result.headline()}**")
+    st.caption(
+        f"Reviewed {result.checked_windows} window(s) with "
+        f"{result.model_used or 'the selected model'}"
+        + (f" on {result.reviewed_at[:16].replace('T', ' ')}" if result.reviewed_at else "")
+    )
+
+    if not result.findings:
+        st.success(
+            "Nothing flagged. That is a real result, not a failure to look — "
+            "though it is only as good as the model that read it.",
+            icon="✅",
+        )
+        return
+
+    slide_conflicts = result.slide_conflicts
+    if slide_conflicts:
+        st.markdown("### 📎 Differs from your slides")
+        st.caption("The reliable half: both texts were supplied.")
+        for finding in slide_conflicts:
+            _render_finding(finding, show_slide=True)
+
+    others = [f for f in result.findings if f not in slide_conflicts]
+    if others:
+        st.markdown("### 🧠 Flagged against general knowledge")
+        st.caption(
+            "Advisory. Check anything here against a source you trust before "
+            "acting on it — including by disagreeing with it."
+        )
+        for finding in others:
+            _render_finding(finding)
+
+
+def _render_finding(finding, show_slide: bool = False) -> None:
+    header = f"{finding.icon} {finding.claim[:110]}"
+    with st.expander(header, expanded=False):
+        st.markdown(f"**{finding.label}** · confidence: {finding.confidence}")
+        if finding.timestamp:
+            st.caption(f"At {finding.timestamp} in the lecture")
+        if finding.quote:
+            st.markdown(f"> {finding.quote}")
+        if finding.explanation:
+            st.markdown(finding.explanation)
+        if finding.mainstream_view:
+            st.markdown(f"**Generally accepted:** {finding.mainstream_view}")
+        if show_slide and finding.slide_conflict:
+            st.info(finding.slide_conflict, icon="📎")
+        if finding.confidence == "low":
+            st.caption(
+                "Low confidence — the model said so itself. Weigh accordingly."
+            )
+
+
+def run_consistency_review(settings: AppSettings, user: User) -> None:
+    chunks = st.session_state.chunks
+    transcript = st.session_state.transcript
+    if not chunks and transcript is not None:
+        chunks = chunk_transcript(
+            transcript, settings.chunk_seconds, settings.chunk_overlap_seconds
+        )
+        st.session_state.chunks = chunks
+    if not chunks:
+        st.error("There is no transcript to review.")
+        return
+
+    client = build_client(settings)
+    if client is None:
+        return
+    meter = attach_meter(client, settings)
+
+    bar = st.progress(0.0, text="Reading the lecture…")
+    report = RunReport()
+    try:
+        result = review_transcript(
+            client,
+            chunks,
+            material=st.session_state.get("material"),
+            exam_topics=examinable_topics(),
+            progress=lambda f, m: bar.progress(min(1.0, f), text=m),
+            report=report,
+        )
+    except LLMError as exc:
+        bar.empty()
+        st.error(f"**The review stopped early.** {exc}", icon="🛑")
+        return
+    finally:
+        commit_usage(meter, user, "review")
+        remember_model_used(user, settings)
+    bar.empty()
+
+    result.reviewed_at = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    st.session_state.review_result = result
+    st.session_state.run_report = report
+    update_saved_lecture(user)
     st.rerun()
 
 
@@ -3018,7 +3189,7 @@ def main() -> None:
 
     names = [
         "📝 Transcript", "📋 Summary", "❓ Questions",
-        "⬇️ Export", "📚 Library", "📊 Usage",
+        "🔍 Review", "⬇️ Export", "📚 Library", "📊 Usage",
     ]
     if user.is_admin:
         names.append("🛠️ Admin")
@@ -3031,13 +3202,15 @@ def main() -> None:
     with tabs[2]:
         questions_tab(settings, user, review)
     with tabs[3]:
-        export_tab()
+        review_tab(settings, user)
     with tabs[4]:
-        library_tab(user)
+        export_tab()
     with tabs[5]:
+        library_tab(user)
+    with tabs[6]:
         usage_tab(user)
     if user.is_admin:
-        with tabs[6]:
+        with tabs[7]:
             admin_tab(directory, user)
 
 

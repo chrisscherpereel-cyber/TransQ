@@ -37,7 +37,9 @@ part 3 ─┘    (sequential)       (one timeline)         │
 | **Exam topics** | Optionally list the topics you will actually test. They outrank everything the app infers about importance, steering both where questions are placed and what each request is told to aim at |
 | **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms — informed by the deck's structure and your exam topics when supplied |
 | **Generate** | Questions are placed by **importance, not by the clock**: the summary's objectives and key points decide which parts of the lecture are worth examining, so admin and tangents are quieted and the argument carries the quiz. Each item carries its timestamp and a verbatim supporting quote. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
+| **Wording** | Choose how stems are framed: **standalone** (default — asks the question directly, no "according to the lecture", reusable across a whole unit), reference the lecture, or an applied scenario. Provenance is unaffected: the timestamp and supporting quote are still recorded on every item |
 | **Review** | An automatic second pass critiques the drafts and repairs or drops weak items |
+| **Consistency check** | A separate 🔍 Review tab reads the lecture and flags claims worth checking again — against your uploaded slides (reliable: both texts are supplied) and against the model's general knowledge (advisory only). Transcription errors are reported separately, because most claims that look wrong in an automatic transcript are Whisper mishearing a term |
 | **Validate** | Mechanical checks for "all of the above", duplicate options, giveaway answer length, negative stems, near-duplicate questions, missing provenance |
 | **Balance** | Correct answers are redistributed across A/B/C/D — LLMs have a strong positional bias students notice fast |
 | **Edit** | Every stem, option, and answer key is editable in the browser before export |
@@ -179,6 +181,33 @@ Fine for drafting; pin a specific model when a particular set matters.
 Whatever you last generated with becomes your starting point next time you sign
 in, per account. That is recorded on *use*, not on selection, so browsing the
 model list does not change what you come back to.
+
+#### Benchmarking models on *your* lectures
+
+A generic leaderboard cannot tell you which model writes sound multiple-choice
+items from a lecture transcript, in JSON, with a verbatim supporting quote,
+under this app's item-writing rules. Only your own prompts can.
+
+`scripts/export_eval.py` writes them out — the real system and user messages,
+generated from one saved lecture, including the slide and exam-topic clauses
+that lecture produces:
+
+```bash
+python3 scripts/export_eval.py --list
+python3 scripts/export_eval.py --lecture "MGT 301 — Week 4" --out eval/
+```
+
+It also writes a rubric describing what a good answer looks like *here*: valid
+complete JSON, `correct_index` aligned with the options, and a `source_quote`
+that appears verbatim in the transcript — the three things that separate a
+usable model from an unusable one, none of which a general benchmark measures.
+
+Run [OpenRouter's Ori Eval](https://openrouter.ai/docs/guides/ori/eval) over
+that directory (`ori login && ori eval`), then pin the winner in the sidebar.
+Ori is a CLI with an interactive login, so it stays outside the deployed app —
+see the script's docstring for why embedding it would not survive a restart.
+
+**The export contains your transcript.** Keep it out of version control.
 
 #### The OpenRouter model list
 
@@ -607,6 +636,7 @@ lecture-quiz-builder/
 │   ├── storage.py                encrypted Store: local files and Dropbox
 │   ├── hostinfo.py               memory ceiling detection and the model guard
 │   ├── materials.py              slides/handouts: extract, match to a window
+│   ├── factcheck.py              consistency review: flag, never adjudicate
 │   ├── accounts.py               users, roles, scrypt passwords, saved keys
 │   ├── usage.py                  live meter and the persistent usage ledger
 │   ├── provisioning.py           issue/cap/revoke per-user OpenRouter keys
@@ -631,6 +661,7 @@ lecture-quiz-builder/
 ├── scripts/
 │   ├── rotate_key.py             re-encrypt everything under a new APP_SECRET
 │   ├── setup_dropbox.py          interactive OAuth: prints a secrets block
+│   ├── export_eval.py            this app's real prompts, for Ori Eval et al.
 │   └── check_dropbox.py          preflight: full encrypted round trip to Dropbox
 └── tests/
     ├── test_pipeline.py             schema, validation, balancing, all exporters
@@ -647,6 +678,8 @@ lecture-quiz-builder/
     ├── test_alternative_sets.py     third and fourth sets, cross-set difference
     ├── test_truncation_salvage.py   keeping questions written before a cut-off
     ├── test_materials.py            real PPTX/PDF/DOCX, matching, exam topics
+    ├── test_eval_export.py          the benchmark export carries the real task
+    ├── test_framing_and_review.py   stem wording, and the review's honesty
     ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
     └── test_hostinfo.py             memory detection and the model-fit verdicts
@@ -657,7 +690,7 @@ lecture-quiz-builder/
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
 
 ```bash
-pytest -q          # 461 tests, no API keys or network needed
+pytest -q          # 495 tests, no API keys or network needed
 ```
 
 ---

@@ -18,6 +18,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import prompts
+from .config import DEFAULT_FRAMING, QUESTION_FRAMING
 from .chunking import allocate_by_importance, chunk_importance
 from .diagnostics import (
     EMPTY,
@@ -124,6 +125,7 @@ def generate_questions(
     focus_points: list[str] | None = None,
     exam_topics: list[str] | None = None,
     material: Any = None,
+    framing: str = DEFAULT_FRAMING,
     progress: ProgressFn | None = None,
     report: RunReport | None = None,
 ) -> list[MCQ]:
@@ -144,6 +146,9 @@ def generate_questions(
     )
 
     report = report or RunReport()
+    framing_rule = QUESTION_FRAMING.get(
+        framing, QUESTION_FRAMING[DEFAULT_FRAMING]
+    )["rule"]
     focus_clause = _build_exam_clause(list(exam_topics or [])) + _build_focus_clause(
         list(focus_points or [])
     )
@@ -175,7 +180,9 @@ def generate_questions(
 
         def _ask(n: int, budget: int) -> dict:
             return client.complete_json(
-                prompts.MCQ_SYSTEM.format(n_options=n_options),
+                prompts.MCQ_SYSTEM.format(
+                    n_options=n_options, framing_rule=framing_rule
+                ),
                 prompts.MCQ_USER.format(
                     n=n,
                     label=chunk.label,
@@ -327,6 +334,7 @@ def generate_question_set(
     summary: Any = None,
     exam_topics: list[str] | None = None,
     material: Any = None,
+    framing: str = DEFAULT_FRAMING,
     avoid_stems: list[str] | None = None,
     do_review: bool = True,
     max_rounds: int = 3,
@@ -383,6 +391,7 @@ def generate_question_set(
         focus_points=focus_points,
         exam_topics=topics,
         material=material,
+        framing=framing,
     )
 
     # Questions that already exist in *other* sets for this lecture. Without
@@ -459,7 +468,11 @@ def generate_question_set(
     # --- Review, then replace whatever it dropped ------------------------ #
     if do_review and questions:
         _emit(0.8, "Reviewing drafted questions")
-        questions, _ = critique_and_revise(client, questions, report=report)
+        # Same framing rule as generation: otherwise the reviewer "repairs" a
+        # standalone stem back into one that cites the lecture.
+        questions, _ = critique_and_revise(
+            client, questions, framing=framing, report=report
+        )
 
         dropped = [q for q in questions if not q.include]
         if dropped and len(_included(questions)) < target:
@@ -575,6 +588,9 @@ def generate_replacement(
     difficulty_mix: str = "Balanced",
     course_context: str = "",
     same_section: bool = True,
+    framing: str = DEFAULT_FRAMING,
+    exam_topics: list[str] | None = None,
+    material: Any = None,
     report: RunReport | None = None,
 ) -> MCQ | None:
     """Write one new question to stand in for ``question``.
@@ -604,6 +620,11 @@ def generate_replacement(
             difficulty_mix=difficulty_mix,
             course_context=course_context,
             avoid_stems=avoid,
+            # A replacement written under different rules from the set it joins
+            # would stand out — which is exactly what a replacement must not do.
+            framing=framing,
+            exam_topics=exam_topics,
+            material=material,
             report=report,
         )
         if drafted:
@@ -820,6 +841,7 @@ def coverage_report(questions: list[MCQ]) -> dict[str, dict[str, int]]:
 def critique_and_revise(
     client: LLMClient,
     questions: list[MCQ],
+    framing: str = DEFAULT_FRAMING,
     progress: ProgressFn | None = None,
     report: RunReport | None = None,
 ) -> tuple[list[MCQ], list[dict]]:
@@ -852,7 +874,10 @@ def critique_and_revise(
         data = client.complete_json(
             prompts.CRITIQUE_SYSTEM,
             prompts.CRITIQUE_USER.format(
-                questions_json=json.dumps(payload, indent=1)[:40000]
+                framing_rule=QUESTION_FRAMING.get(
+                    framing, QUESTION_FRAMING[DEFAULT_FRAMING]
+                )["rule"],
+                questions_json=json.dumps(payload, indent=1)[:40000],
             ),
             max_tokens=max(3000, len(questions) * 400),
         )

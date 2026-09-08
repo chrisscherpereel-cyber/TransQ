@@ -169,6 +169,46 @@ LLM_MODELS: dict[str, list[str]] = {k: list(p.models) for k, p in PROVIDERS.item
 
 AUDIO_EXTENSIONS = ["mp3", "wav", "m4a", "mp4", "mpeg", "mpga", "webm", "ogg", "flac", "aac"]
 
+# How a question refers — or does not refer — to the lecture it came from.
+#
+# The default changed to "standalone" because "According to the lecture, which of
+# the following..." is a worse exam item than the same question asked plainly:
+# it cues the student that recall is wanted, it cannot be reused on a midterm
+# that spans six weeks, and it reads as an artefact of how the item was made.
+# Provenance does not disappear — the timestamp and supporting quote are still
+# recorded on every item; they simply stop appearing in the stem.
+QUESTION_FRAMING: dict[str, dict[str, str]] = {
+    "standalone": {
+        "label": "Standalone — ask the question directly",
+        "help": "No mention of the lecture in the stem. Best for exams, and "
+        "reusable across a whole unit.",
+        "rule": "- Ask the question directly, as it would appear on an exam. Never "
+        'refer to the source: no "according to the lecture", "as discussed in '
+        'class", "the instructor said", "in the video", or "based on the '
+        'transcript". The student should not be able to tell where the item came '
+        "from. Name the concepts and context the question needs so it stands on "
+        "its own without that framing.",
+    },
+    "lecture": {
+        "label": "Reference the lecture",
+        "help": "Stems may say \"according to the lecture\". Useful for a "
+        "comprehension check tied to one session.",
+        "rule": "- Where it aids clarity, the stem may refer to the lecture "
+        '("according to the lecture", "as presented in class").',
+    },
+    "scenario": {
+        "label": "Applied scenario",
+        "help": "Opens with a brief concrete situation, then asks. Pushes items "
+        "up Bloom's levels toward Apply and Analyze.",
+        "rule": "- Open each stem with a brief, concrete situation (one or two "
+        "sentences: a firm, a decision, a set of numbers) and ask what follows "
+        "from it. Never refer to the lecture, the class, or the transcript — the "
+        "scenario is the whole context the student is given.",
+    },
+}
+
+DEFAULT_FRAMING = "standalone"
+
 # The lecture's own supporting material: slides, handouts, readings.
 MATERIAL_EXTENSIONS = ["pptx", "pdf", "docx", "txt", "md"]
 
@@ -205,6 +245,9 @@ class AppSettings:
     # What the instructor says will be examined. Outranks everything the app
     # infers about importance — see chunking.EXAM_TOPIC_WEIGHT.
     exam_topics: str = ""
+
+    # How stems refer to their source. See QUESTION_FRAMING.
+    framing: str = DEFAULT_FRAMING
 
     # Generation
     provider: str = DEFAULT_PROVIDER

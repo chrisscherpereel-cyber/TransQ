@@ -128,6 +128,7 @@ class SavedLecture:
     # friction that stops people regenerating.
     material: Any = None
     exam_topics: list[str] = field(default_factory=list)
+    review: Any = None
 
 
 class TranscriptLibrary:
@@ -191,6 +192,7 @@ class TranscriptLibrary:
         entry_id: str | None = None,
         material: Any = None,
         exam_topics: list[str] | None = None,
+        review: Any = None,
     ) -> LibraryEntry:
         """Create or replace a saved lecture. Returns its index entry."""
         if transcript is None or not transcript.segments:
@@ -234,6 +236,7 @@ class TranscriptLibrary:
                 "quizzes": [q.model_dump() for q in quizzes],
                 "material": material.to_dict() if material is not None else None,
                 "exam_topics": list(exam_topics or []),
+                "review": review.to_dict() if review is not None else None,
             },
         )
         self._upsert(entry)
@@ -284,6 +287,15 @@ class TranscriptLibrary:
             except Exception:  # noqa: BLE001 - a bad deck must not block a reopen
                 material = None
 
+        review = None
+        if document.get("review"):
+            try:
+                from .factcheck import ReviewResult
+
+                review = ReviewResult.from_dict(document["review"])
+            except Exception:  # noqa: BLE001 - never block a reopen
+                review = None
+
         entry = LibraryEntry.from_dict(document.get("entry") or {"id": entry_id, "title": ""})
         return SavedLecture(
             entry=entry,
@@ -292,6 +304,7 @@ class TranscriptLibrary:
             quizzes=quizzes,
             material=material,
             exam_topics=list(document.get("exam_topics") or []),
+            review=review,
         )
 
     def delete(self, entry_id: str) -> None:
