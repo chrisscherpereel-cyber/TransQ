@@ -3214,8 +3214,83 @@ def _admin_action(function, *args) -> None:
 # --------------------------------------------------------------------------- #
 
 
+# What app.py needs from src/. Each entry is a module attribute and, optionally,
+# keyword arguments that attribute must accept. Deploying is a file copy, and a
+# copy that misses one file leaves an app.py calling a src/ that predates it —
+# which surfaces as a bare TypeError deep in a Streamlit traceback, at the moment
+# of use, with nothing pointing at the real cause. Checked once at startup so it
+# is a sentence instead.
+REQUIRED_API: list[tuple[str, str, tuple[str, ...]]] = [
+    ("src.summarize", "summarize_transcript", ("cached_sections", "on_section")),
+    ("src.summarize", "summary_from_sections", ()),
+    ("src.llm", "salvage_object_fields", ()),
+    ("src.llm", "salvage_array_objects", ()),
+    ("src.mcq", "generate_question_set", ("avoid_stems", "framing", "material")),
+    ("src.transcribe", "transcribe_parts", ("on_part_complete", "resume_from")),
+    ("src.factcheck", "review_transcript", ()),
+    ("src.materials", "extract_material", ()),
+    ("src.hostinfo", "check_model_fits", ()),
+]
+
+
+def stale_modules() -> list[str]:
+    """Names the files that are older than the app.py calling them."""
+    import importlib
+    import inspect
+
+    problems: list[str] = []
+    for module_name, attr, kwargs in REQUIRED_API:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # noqa: BLE001 - report it, do not crash on it
+            problems.append(f"`{module_name.replace('.', '/')}.py` — will not import ({exc})")
+            continue
+        target = getattr(module, attr, None)
+        if target is None:
+            problems.append(f"`{module_name.replace('.', '/')}.py` — has no `{attr}`")
+            continue
+        try:
+            accepted = set(inspect.signature(target).parameters)
+        except (TypeError, ValueError):
+            continue
+        missing = [k for k in kwargs if k not in accepted]
+        if missing:
+            problems.append(
+                f"`{module_name.replace('.', '/')}.py` — `{attr}` does not accept "
+                + ", ".join(f"`{m}`" for m in missing)
+            )
+    return problems
+
+
+def version_check() -> bool:
+    """False when the app should not run. Says which files to replace."""
+    problems = stale_modules()
+    if not problems:
+        return True
+
+    st.error(
+        "**Some files in `src/` are older than `app.py`.** The app will fail "
+        "partway through a run rather than at startup, so it stops here instead.",
+        icon="🧩",
+    )
+    for problem in problems:
+        st.markdown(f"- {problem}")
+    st.info(
+        "This happens when a new version is copied in file by file, or when an "
+        "archive is extracted without replacing everything. **Replace the whole "
+        "`src/` folder**, not just `app.py`, and redeploy.\n\n"
+        "If you deploy from GitHub, check that the `src/` changes were actually "
+        "committed and pushed — `git status` in the repo will list any that were "
+        "not, and Streamlit Cloud serves whatever the branch contains.",
+        icon="🛠️",
+    )
+    return False
+
+
 def main() -> None:
     init_state()
+    if not version_check():
+        return
     try:
         _, directory, _, config, backend_warning, _ = get_backend()
     except StorageError as exc:

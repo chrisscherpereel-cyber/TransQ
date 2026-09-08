@@ -662,7 +662,8 @@ lecture-quiz-builder/
 │   ├── rotate_key.py             re-encrypt everything under a new APP_SECRET
 │   ├── setup_dropbox.py          interactive OAuth: prints a secrets block
 │   ├── export_eval.py            this app's real prompts, for Ori Eval et al.
-│   └── check_dropbox.py          preflight: full encrypted round trip to Dropbox
+│   ├── check_dropbox.py          preflight: full encrypted round trip to Dropbox
+│   └── check_build.py            preflight: app.py and src/ are the same vintage
 └── tests/
     ├── test_pipeline.py             schema, validation, balancing, all exporters
     ├── test_llm_clients.py          provider wiring, against stubbed SDKs
@@ -683,15 +684,17 @@ lecture-quiz-builder/
     ├── test_dropbox_backend.py      health check, error advice, encrypted round trip
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
     ├── test_summary_resume.py       resuming a summary, salvage, local fallback
+    ├── test_deploy_integrity.py     app.py and src/ must be the same vintage
     └── test_hostinfo.py             memory detection and the model-fit verdicts
 ```
 
 `scripts/setup_dropbox.py` walks through Dropbox authorization;
 `scripts/check_dropbox.py` verifies it end to end before you rely on it;
-`scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`.
+`scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`;
+`scripts/check_build.py` catches a half-copied deploy before you push it.
 
 ```bash
-pytest -q          # 512 tests, no API keys or network needed
+pytest -q          # 524 tests, no API keys or network needed
 ```
 
 ---
