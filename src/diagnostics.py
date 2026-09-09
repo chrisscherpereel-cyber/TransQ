@@ -21,6 +21,8 @@ PHASE_SUMMARY = "Summarize"
 PHASE_GENERATE = "Generate"
 PHASE_REVIEW = "Review"
 PHASE_REPLACE = "Replace"
+# Named here rather than imported, to keep diagnostics free of a factcheck import.
+PHASE_REVIEW_CLAIMS_NAME = "Consistency review"
 
 OK = "ok"
 FAILED = "failed"
@@ -107,8 +109,22 @@ class RunReport:
         return f"{failures} of {len(self.steps)} model calls failed."
 
     def advice(self) -> str:
-        """What to actually do about the most common failure in this run."""
-        return ADVICE.get(self.dominant_cause(), "")
+        """What to actually do about the most common failure in this run.
+
+        Phase-aware, because the same cause has different fixes in different
+        places. A truncated reply during *summarization* has nothing to do with
+        the question count, and telling someone to "ask for fewer questions"
+        while summarizing sends them to a setting that cannot help — which is
+        worse than saying nothing, because they will try it.
+        """
+        cause = self.dominant_cause()
+        phase = self._dominant_failing_phase()
+        override = PHASE_ADVICE.get((phase, cause))
+        return override or ADVICE.get(cause, "")
+
+    def _dominant_failing_phase(self) -> str:
+        phases = Counter(s.phase for s in self.failures if s.phase)
+        return phases.most_common(1)[0][0] if phases else ""
 
     def as_rows(self) -> list[dict[str, object]]:
         return [
@@ -176,6 +192,25 @@ ADVICE = {
     CAUSE_TIMEOUT: (
         "The request timed out. Long chunks on a slow model are the usual cause — "
         "shorten the chunk length in **Context & advanced**."
+    ),
+}
+
+
+# Advice that depends on *where* the failure happened, not only on what it was.
+PHASE_ADVICE: dict[tuple[str, str], str] = {
+    (PHASE_SUMMARY, CAUSE_TRUNCATED): (
+        "The model's reply was cut off while summarizing. Every window that "
+        "finished has been kept, so pressing **Summarize & generate** again "
+        "resumes from where it stopped rather than starting over — it will not "
+        "re-pay for the windows already done. The question count is irrelevant "
+        "here; if it keeps happening, shorten the chunk length in **Context & "
+        "advanced** or switch to a non-reasoning model, whose thinking does not "
+        "count against the output budget."
+    ),
+    (PHASE_REVIEW_CLAIMS_NAME, CAUSE_TRUNCATED): (
+        "The consistency review was cut off. Windows that finished are kept. "
+        "A shorter chunk length or a model with a larger output limit will get "
+        "through the rest."
     ),
 }
 

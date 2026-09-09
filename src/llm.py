@@ -420,6 +420,74 @@ def salvage_array_objects(raw: str, key: str) -> list[dict[str, Any]]:
     return found
 
 
+def salvage_object_fields(raw: str) -> dict[str, Any]:
+    """Recover the top-level fields of a JSON object that was cut off.
+
+    The array salvage above rescues a truncated list of questions. A summary is
+    a different shape — one object whose fields are a heading, some key points,
+    some terms — but it fails the same way: the model writes three good fields
+    and stops midway through the fourth. Throwing away all four is the same
+    mistake in a different place.
+
+    The method is deliberately blunt. Every finished field is followed by a comma
+    sitting at depth one, so close the object at one of those commas and try to
+    parse; walk backwards through the candidates until one succeeds. The field
+    that was in progress at the cut is lost, which is right — it was never
+    finished, and half a key point is worse than none.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {}
+
+    fence = re.search(r"```(?:json)?\s*(.*)", text, re.DOTALL)
+    if fence:
+        text = fence.group(1)
+
+    opening = text.find("{")
+    if opening < 0:
+        return {}
+    text = text[opening:]
+
+    try:
+        # raw_decode rather than loads: a reply that closed its object and then
+        # added a closing fence, or a sentence of commentary, is complete.
+        whole, _ = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        pass
+    else:
+        return whole if isinstance(whole, dict) else {}
+
+    breaks: list[int] = []
+    depth, in_string, escaped = 0, False, False
+    for i, char in enumerate(text):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+        elif char == "," and depth == 1:
+            breaks.append(i)
+
+    for cut in reversed(breaks):
+        try:
+            data = json.loads(text[:cut] + "}")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return {}
+
+
 def _is_transient(exc: Exception) -> bool:
     text = f"{type(exc).__name__} {exc}".lower()
     markers = (
