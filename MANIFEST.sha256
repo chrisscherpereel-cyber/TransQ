@@ -1,6 +1,6 @@
 # Fingerprints of the files this build runs. Regenerate with
 # python3 scripts/make_manifest.py after changing any of them.
-4227ff5bfdcb8c57b522aa2d936c411515da55dcc80a295505f9651c2dcac8f5  app.py
+b9f9a1ff8ab49b546539b4338908aeeba78c37bbfe74ba4e229cf478912f37e0  app.py
 464d6d8de1bb83cdad825b25000fa6af09a026f07fec4789513099e1d59e1eb6  src/__init__.py
 65e5ceb345bb6398bc75959bce41357c748879fecfe2f905321ef9d39389f7c5  src/accounts.py
 46b5caf3702e416ec4eef052c0b9c6266b00fad87b5a596e3943d4db734ba39c  src/appconfig.py

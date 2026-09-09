@@ -3230,7 +3230,28 @@ REQUIRED_API: list[tuple[str, str, tuple[str, ...]]] = [
     ("src.factcheck", "review_transcript", ()),
     ("src.materials", "extract_material", ()),
     ("src.hostinfo", "check_model_fits", ()),
+    # One symbol per file that gained one recently. The point is coverage: a
+    # stale file the list does not mention is a stale file nobody hears about
+    # until it misbehaves, and "which files do I still need?" is the only
+    # question anyone is asking at this screen.
+    ("src.diagnostics", "PHASE_ADVICE", ()),
+    ("src.config", "QUESTION_FRAMING", ()),
+    ("src.chunking", "allocate_by_importance", ()),
+    ("src.prompts", "REVIEW_SYSTEM", ()),
+    ("src.library", "TranscriptLibrary.save", ("material", "exam_topics", "review")),
+    ("src.buildinfo", "compare", ()),
 ]
+
+
+def resolve(module: object, dotted: str) -> object | None:
+    """`TranscriptLibrary.save` as readily as `compare` — a method's arguments
+    are as good a fingerprint as a function's, and often the only one available."""
+    target: object | None = module
+    for part in dotted.split("."):
+        target = getattr(target, part, None)
+        if target is None:
+            return None
+    return target
 
 
 def stale_modules() -> list[str]:
@@ -3256,7 +3277,7 @@ def stale_modules() -> list[str]:
         except Exception as exc:  # noqa: BLE001 - report it, do not crash on it
             problems.append(f"`{module_name.replace('.', '/')}.py` — will not import ({exc})")
             continue
-        target = getattr(module, attr, None)
+        target = resolve(module, attr)
         if target is None:
             problems.append(f"`{module_name.replace('.', '/')}.py` — has no `{attr}`")
             continue
