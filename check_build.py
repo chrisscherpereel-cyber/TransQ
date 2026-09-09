@@ -49,6 +49,17 @@ def problems() -> list[str]:
         path = module_name.replace(".", "/") + ".py"
         try:
             module = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            # One absent file makes every module importing it unimportable. Name
+            # the file that is missing, once — six lines with one cause reads as
+            # six problems and sends people looking in the wrong places.
+            missing_module = (exc.name or "").replace(".", "/")
+            found.append(
+                f"{missing_module}.py is missing entirely"
+                if missing_module
+                else f"{path} will not import: {exc}"
+            )
+            continue
         except Exception as exc:  # noqa: BLE001 - report it, do not crash on it
             found.append(f"{path} will not import: {exc}")
             continue
@@ -70,26 +81,74 @@ def problems() -> list[str]:
                 + ", ".join(missing)
                 + " — the file predates app.py"
             )
-    return found
+    return list(dict.fromkeys(found))
+
+
+ADVICE = (
+    "\nFix: replace the whole src/ folder, not just app.py."
+    "\n\nExtracting an archive over a checkout never removes or replaces what it"
+    "\ndoes not contain, so old files survive an update. And if you deploy from"
+    "\nGitHub, Streamlit Cloud serves THE BRANCH, not your working directory:"
+    "\nrun `git status`, and anything under 'Changes not staged' or 'Untracked"
+    "\nfiles' is not on the server."
+)
 
 
 def main() -> int:
     issues = problems()
-    if not issues:
-        print("✅ app.py and src/ agree. Safe to deploy.")
+
+    drift: list[str] = []
+    try:
+        from src.buildinfo import compare
+
+        status = compare()
+        # Anything the signature check already named is not news a second time.
+        named = " ".join(issues)
+        drift = [
+            f"{p} differs from the packaged build"
+            for p in status.changed
+            if p not in named
+        ]
+        drift += [f"{p} is missing entirely" for p in status.missing if p not in named]
+    except Exception:  # noqa: BLE001 - the fingerprint check is a bonus, not a gate
+        status = None
+
+    if not issues and not drift:
+        if status is not None and status.has_manifest:
+            print(f"✅ app.py and src/ agree, and all {status.checked} files match")
+            print("   the packaged build. Safe to deploy.")
+        else:
+            print("✅ app.py and src/ agree. Safe to deploy.")
+            print("   (No MANIFEST.sha256 — run scripts/make_manifest.py to add one.)")
         return 0
 
-    print("❌ Some files in src/ are older than app.py.\n")
-    for issue in issues:
-        print(f"  · {issue}")
-    print(
-        "\nThe app would start normally and then fail partway through a run,"
-        "\nwith a traceback that stops at the call and names no cause."
-        "\n\nFix: replace the whole src/ folder, not just app.py."
-        "\nIf you deploy from GitHub, run `git status` — the src/ changes were"
-        "\nprobably never committed, and Streamlit Cloud serves the branch."
-    )
-    return 1
+    if issues:
+        print("❌ Some files in src/ are older than app.py.\n")
+        for issue in issues:
+            print(f"  · {issue}")
+        print(
+            "\nThe app would start normally and then fail partway through a run,"
+            "\nwith a traceback that stops at the call and names no cause."
+        )
+
+    if drift:
+        if issues:
+            print("\nAlso out of date, for the same reason:\n")
+        else:
+            print("⚠️  Some files differ from the build they were packaged in.\n")
+        for item in drift:
+            print(f"  · {item}")
+        if not issues:
+            print(
+                "\nNothing will crash — these are body changes, not signature"
+                "\nchanges. Expected if you have been editing the code, in which"
+                "\ncase run `python3 scripts/make_manifest.py` to re-record them."
+                "\nIf you have not been editing, part of an update did not arrive."
+            )
+
+    if issues or status is None or not status.has_manifest:
+        print(ADVICE)
+    return 1 if issues else 0
 
 
 if __name__ == "__main__":

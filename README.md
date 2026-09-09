@@ -622,6 +622,7 @@ surprise before you get there.
 lecture-quiz-builder/
 ├── app.py                        Streamlit UI and pipeline orchestration
 ├── requirements.txt
+├── MANIFEST.sha256               fingerprints, so a half-copied deploy is visible
 ├── conftest.py
 ├── .streamlit/
 │   ├── config.toml               upload cap, theme
@@ -632,6 +633,7 @@ lecture-quiz-builder/
 │   ├── transcribe.py             faster-whisper wrapper, multi-part stitching
 │   ├── chunking.py               time-window splitting, question allocation
 │   ├── llm.py                    five-provider abstraction, retries, cost
+│   ├── buildinfo.py              is this running the code that was shipped?
 │   ├── openrouter_catalog.py     live model list: fetch, filter, sort, free flags
 │   ├── storage.py                encrypted Store: local files and Dropbox
 │   ├── hostinfo.py               memory ceiling detection and the model guard
@@ -657,13 +659,15 @@ lecture-quiz-builder/
 │       └── transcript_formats.py TXT, SRT, WebVTT
 ├── docs/
 │   ├── DROPBOX.md                step-by-step encrypted-storage setup
-│   └── DEPLOY_NOTES.md           why there is no packages.txt
+│   ├── DEPLOY_NOTES.md           why there is no packages.txt
+│   └── UPDATING.md               replacing a deployed copy without half-copying it
 ├── scripts/
 │   ├── rotate_key.py             re-encrypt everything under a new APP_SECRET
 │   ├── setup_dropbox.py          interactive OAuth: prints a secrets block
 │   ├── export_eval.py            this app's real prompts, for Ori Eval et al.
 │   ├── check_dropbox.py          preflight: full encrypted round trip to Dropbox
-│   └── check_build.py            preflight: app.py and src/ are the same vintage
+│   ├── check_build.py            preflight: app.py and src/ are the same vintage
+│   └── make_manifest.py          re-record fingerprints after editing the code
 └── tests/
     ├── test_pipeline.py             schema, validation, balancing, all exporters
     ├── test_llm_clients.py          provider wiring, against stubbed SDKs
@@ -685,16 +689,18 @@ lecture-quiz-builder/
     ├── test_crash_recovery.py       per-part checkpoints, resume, timeline joins
     ├── test_summary_resume.py       resuming a summary, salvage, local fallback
     ├── test_deploy_integrity.py     app.py and src/ must be the same vintage
+    ├── test_build_fingerprints.py   catching a stale file that still imports
     └── test_hostinfo.py             memory detection and the model-fit verdicts
 ```
 
 `scripts/setup_dropbox.py` walks through Dropbox authorization;
 `scripts/check_dropbox.py` verifies it end to end before you rely on it;
 `scripts/rotate_key.py` re-encrypts the store under a new `APP_SECRET`;
-`scripts/check_build.py` catches a half-copied deploy before you push it.
+`scripts/check_build.py` catches a half-copied deploy before you push it —
+see `docs/UPDATING.md`, which is worth reading once before your first update.
 
 ```bash
-pytest -q          # 524 tests, no API keys or network needed
+pytest -q          # 536 tests, no API keys or network needed
 ```
 
 ---

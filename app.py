@@ -3242,6 +3242,17 @@ def stale_modules() -> list[str]:
     for module_name, attr, kwargs in REQUIRED_API:
         try:
             module = importlib.import_module(module_name)
+        except ModuleNotFoundError as exc:
+            # One absent file makes every module that imports it unimportable.
+            # Name the file that is actually missing, once, rather than listing
+            # each casualty — a list of six lines with one cause reads as six
+            # problems, and sends people looking in the wrong places.
+            missing = (exc.name or "").replace(".", "/")
+            problems.append(
+                f"`{missing}.py` — missing entirely" if missing
+                else f"`{module_name.replace('.', '/')}.py` — will not import ({exc})"
+            )
+            continue
         except Exception as exc:  # noqa: BLE001 - report it, do not crash on it
             problems.append(f"`{module_name.replace('.', '/')}.py` — will not import ({exc})")
             continue
@@ -3259,32 +3270,79 @@ def stale_modules() -> list[str]:
                 f"`{module_name.replace('.', '/')}.py` — `{attr}` does not accept "
                 + ", ".join(f"`{m}`" for m in missing)
             )
-    return problems
+    return list(dict.fromkeys(problems))
+
+
+def build_drift() -> list[str]:
+    """Files whose contents differ from the build they were packaged in.
+
+    The signature check above sees only shape. A file whose body changed but
+    whose functions kept their arguments — a fixed prompt, a corrected threshold
+    — passes it while still being the wrong file. This catches those, and it is
+    the only way to find out on a host where you cannot run a script.
+    """
+    try:
+        from src.buildinfo import compare
+    except Exception:  # noqa: BLE001 - an old tree has no buildinfo; say nothing
+        return []
+    status = compare()
+    if not status.has_manifest or status.is_clean:
+        return []
+    return [f"`{p}` — differs" for p in status.changed] + [
+        f"`{p}` — missing entirely" for p in status.missing
+    ]
+
+
+COPY_ADVICE = (
+    "**Replace the whole `src/` folder**, not just `app.py`, and redeploy.\n\n"
+    "Two things cause this. Extracting an archive over a checkout never deletes "
+    "or replaces what it does not contain, so files can survive an update. And "
+    "if you deploy from GitHub, Streamlit Cloud serves **the branch**, not your "
+    "working directory — run `git status` in the repo, and anything listed under "
+    "*Changes not staged* or *Untracked files* is not on the server.\n\n"
+    "`python3 scripts/check_build.py` reports the same thing locally, before you "
+    "push, and exits non-zero so it works as a pre-push hook."
+)
 
 
 def version_check() -> bool:
     """False when the app should not run. Says which files to replace."""
     problems = stale_modules()
-    if not problems:
-        return True
+    if problems:
+        st.error(
+            "**Some files in `src/` are older than `app.py`.** The app would "
+            "fail partway through a run rather than at startup, so it stops "
+            "here instead.",
+            icon="🧩",
+        )
+        for problem in problems:
+            st.markdown(f"- {problem}")
 
-    st.error(
-        "**Some files in `src/` are older than `app.py`.** The app will fail "
-        "partway through a run rather than at startup, so it stops here instead.",
-        icon="🧩",
-    )
-    for problem in problems:
-        st.markdown(f"- {problem}")
-    st.info(
-        "This happens when a new version is copied in file by file, or when an "
-        "archive is extracted without replacing everything. **Replace the whole "
-        "`src/` folder**, not just `app.py`, and redeploy.\n\n"
-        "If you deploy from GitHub, check that the `src/` changes were actually "
-        "committed and pushed — `git status` in the repo will list any that were "
-        "not, and Streamlit Cloud serves whatever the branch contains.",
-        icon="🛠️",
-    )
-    return False
+        drift = [d for d in build_drift() if d.split("`")[1] not in " ".join(problems)]
+        if drift:
+            st.markdown("**Also out of date, for the same reason:**")
+            for item in drift:
+                st.markdown(f"- {item}")
+
+        st.info(COPY_ADVICE, icon="🛠️")
+        return False
+
+    # Nothing will crash, but something may still not be what was shipped. That
+    # is worth saying quietly and never worth blocking on — during your own
+    # development, drift is simply the work you are doing.
+    drift = build_drift()
+    if drift:
+        with st.expander(
+            f"⚠️ {len(drift)} file(s) differ from the packaged build", expanded=False
+        ):
+            for item in drift:
+                st.markdown(f"- {item}")
+            st.caption(
+                "Expected if you have been editing the code — regenerate the "
+                "fingerprints with `python3 scripts/make_manifest.py`. If you "
+                "have not, part of an update did not arrive."
+            )
+    return True
 
 
 def main() -> None:
