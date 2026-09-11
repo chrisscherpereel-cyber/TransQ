@@ -670,7 +670,9 @@ lecture-quiz-builder/
 │   ├── export_eval.py            this app's real prompts, for Ori Eval et al.
 │   ├── check_dropbox.py          preflight: full encrypted round trip to Dropbox
 │   ├── check_build.py            preflight: app.py and src/ are the same vintage
-│   └── make_manifest.py          re-record fingerprints after editing the code
+│   ├── make_manifest.py          re-record fingerprints after editing the code
+│   ├── mac_setup.command         double-click to install and run on a Mac
+│   └── windows_setup.bat         double-click to install and run on Windows
 └── tests/
     ├── test_pipeline.py             schema, validation, balancing, all exporters
     ├── test_llm_clients.py          provider wiring, against stubbed SDKs
@@ -704,7 +706,7 @@ lecture-quiz-builder/
 see `docs/UPDATING.md`, which is worth reading once before your first update.
 
 ```bash
-pytest -q          # 588 tests, no API keys or network needed
+pytest -q          # 594 tests, no API keys or network needed
 ```
 
 ---

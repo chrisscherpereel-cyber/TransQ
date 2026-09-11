@@ -131,13 +131,23 @@ def probe(base_url: str, timeout: float = PROBE_TIMEOUT) -> LocalServer:
 
 
 def _explain_unreachable(url: str, exc: Exception) -> str:
-    """Say which of the two likely causes it is, rather than printing errno."""
+    """Say which cause it is, rather than printing an errno at the user."""
     reason = str(getattr(exc, "reason", exc)).lower()
     port = url.split(":")[-1].split("/")[0]
     if "refused" in reason:
         return (
             f"Nothing is listening on port {port}. Start Ollama or LM Studio, "
             "then check again."
+        )
+    if "cannot assign requested address" in reason or "errno 99" in reason:
+        # A sandbox that forbids loopback connections outright — Streamlit Cloud
+        # among them. The message matters because the obvious reading is "my
+        # Ollama is broken", and the actual answer is that this machine was never
+        # going to be able to reach one.
+        return (
+            "This server is not allowed to connect to itself, which means it is "
+            "a hosted container rather than your own computer. A local model "
+            "cannot be reached from here — run the app on your own machine."
         )
     if "timed out" in reason or "timeout" in reason:
         return (

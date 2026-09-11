@@ -111,8 +111,38 @@ size does better on this task and is several times faster.
 
 ## Step 3 — Run the app on that computer
 
+### The short way
+
+1. On GitHub, click the green **Code** button → **Download ZIP**. Unzip it —
+   on a Mac it lands in Downloads as a folder called `TransQ-main`.
+2. Open the `scripts` folder inside it and double-click:
+   - **macOS** — `mac_setup.command`
+   - **Windows** — `windows_setup.bat`
+
+That script creates a private Python environment inside the folder, installs
+everything, generates your `APP_SECRET`, tells you whether it found Ollama, and
+starts the app. First run takes a few minutes; after that it starts in seconds.
+Run it again any time you want to start the app.
+
+> **If macOS refuses to open it** — "permission denied", or the file opens in a
+> text editor — that is because downloading a ZIP strips the permission that
+> makes a file runnable. Open **Terminal** and paste this instead, which does not
+> need it:
+>
+> ```bash
+> cd ~/Downloads/TransQ-main && bash scripts/mac_setup.command
+> ```
+>
+> Adjust the folder name if yours differs. If macOS says the file is from an
+> unidentified developer, right-click it → **Open** → **Open**, which is the
+> standard way to approve a file you downloaded yourself.
+
+### The manual way
+
+If you would rather see each step, or the script failed and you want to know
+where:
+
 ```bash
-git clone https://github.com/chrisscherpereel-cyber/TransQ.git
 cd TransQ
 
 python3 -m venv .venv
@@ -141,8 +171,13 @@ Paste the printed string into `.env` as `APP_SECRET=...`. Then:
 streamlit run app.py
 ```
 
-Your browser opens at `http://localhost:8501`. The app asks you to create an
-admin account the first time.
+Either way, your browser opens at `http://localhost:8501` and the app asks you
+to create an admin account the first time.
+
+> **Windows note:** if the script says Python is not installed, get it from
+> [python.org/downloads](https://www.python.org/downloads/) and **tick "Add
+> python.exe to PATH"** on the installer's first screen. That checkbox is the
+> difference between the script working and not.
 
 > **This is a separate library from your hosted app.** Lectures saved here live
 > in this folder, encrypted under this `APP_SECRET`. If you want one library

@@ -308,3 +308,102 @@ def test_the_provider_note_points_at_the_instructions():
     note = PROVIDERS["local"].note
     assert "LOCAL_MODELS.md" in note
     assert "same machine" in note
+
+
+# --------------------------------------------------------------------------- #
+# A hosted container is not a broken setup
+# --------------------------------------------------------------------------- #
+#
+# Reported from the live deployment: "Could not reach http://localhost:11434/v1:
+# [Errno 99] Cannot assign requested address", under a caption telling the user
+# to install Ollama, under a memory reading of 3 GB.
+#
+# Every part of that was wrong as advice. Streamlit's container forbids loopback
+# connections outright, so the errno is not a symptom of anything the user can
+# fix; installing Ollama would not have helped; and the 3 GB was *Streamlit's*
+# memory being reported as though it were their Mac's, which would steer someone
+# with 32 GB toward a 3B model.
+
+
+def test_a_sandbox_that_forbids_loopback_is_named_as_such(monkeypatch):
+    """The obvious reading of errno 99 is "my Ollama is broken". The actual
+    answer is that this machine was never going to reach one."""
+    fail(monkeypatch, urllib.error.URLError("[Errno 99] Cannot assign requested address"))
+    detail = localmodels.probe("http://localhost:11434").detail
+
+    assert "hosted container" in detail
+    assert "own computer" in detail
+    assert "Errno" not in detail, "an errno is not an explanation"
+
+
+def test_the_hosted_branch_never_reports_the_servers_memory():
+    """A memory figure read on Streamlit's container describes Streamlit, not the
+    user's machine, and would send someone with 32 GB to a 3B model. The hosted
+    path must not call the guidance at all."""
+    import ast
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text()
+    start = source.index("def local_model_picker")
+    body = source[start : source.index("\ndef ", start + 10)]
+
+    hosted = body[body.index("if is_ephemeral_host():") : body.index("Server address")]
+    assert "guidance(" not in hosted
+    assert "available_memory_gb" not in hosted
+    assert "return " in hosted, "the hosted branch must stop, not fall through"
+    ast.parse(body.strip())
+
+
+def test_the_hosted_branch_offers_the_route_that_actually_works():
+    """Telling someone what cannot work is half an answer. The other half is the
+    setup script, and the free model that works right now."""
+    from pathlib import Path
+
+    source = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text()
+    start = source.index("def local_model_picker")
+    body = source[start : source.index("\ndef ", start + 10)]
+    hosted = body[body.index("if is_ephemeral_host():") : body.index("Server address")]
+
+    assert "mac_setup.command" in hosted
+    assert "windows_setup.bat" in hosted
+    assert "openrouter/free" in hosted, "say what works while they set this up"
+
+
+def test_the_setup_scripts_exist_and_are_not_empty():
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parent.parent / "scripts"
+    for name in ("mac_setup.command", "windows_setup.bat"):
+        path = scripts / name
+        assert path.is_file(), f"{name} is missing"
+        assert len(path.read_text()) > 500
+
+
+def test_the_setup_scripts_never_overwrite_an_existing_secret():
+    """Regenerating APP_SECRET makes every saved lecture unreadable. A setup
+    script that runs twice must be safe the second time."""
+    from pathlib import Path
+
+    scripts = Path(__file__).resolve().parent.parent / "scripts"
+    mac = (scripts / "mac_setup.command").read_text()
+    win = (scripts / "windows_setup.bat").read_text()
+
+    assert 'if [ ! -f ".env" ]' in mac
+    assert 'if not exist ".env"' in win
+    for text in (mac, win):
+        assert "back up" in text.lower()
+
+
+def test_the_recommended_pull_command_matches_the_documentation():
+    """A model name in the UI that the docs never mention sends people to a
+    dead end."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    app = root.joinpath("app.py").read_text()
+    docs = root.joinpath("docs", "LOCAL_MODELS.md").read_text()
+
+    start = app.index("def local_model_picker")
+    body = app[start : app.index("\ndef ", start + 10)]
+    assert "ollama pull qwen2.5:14b" in body
+    assert "qwen2.5:14b" in docs

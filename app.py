@@ -416,18 +416,40 @@ def local_model_picker(user: User, saved_model: str) -> tuple[str, str]:
     """
     from src.localmodels import DEFAULT_BASE_URL, guidance, normalise
 
-    # The one thing that must be said before anything else. On Streamlit Cloud
-    # "localhost" is Streamlit's container, not the user's laptop, and no
-    # setting can bridge that. Saying so here saves an afternoon of debugging a
-    # connection that cannot exist.
+    # On a hosted deployment this is not a setup problem with a fix, it is the
+    # definition of "local". Everything below — the probe, the memory advice,
+    # "install Ollama" — would be answering a question the user is not in a
+    # position to ask, and the memory figure would be reporting *Streamlit's*
+    # container rather than their computer, which is actively misleading. So the
+    # hosted case gets its own screen and stops.
     if is_ephemeral_host():
         st.warning(
             "**This app is running on Streamlit's servers, so it cannot reach a "
             "model on your computer.** `localhost` here means Streamlit's own "
-            "machine. To use a local model, run the app on the same computer as "
-            "the model — `docs/LOCAL_MODELS.md` has the steps.",
+            "machine, not yours. No address will bridge that — it is what "
+            "\"local\" means.",
             icon="🌐",
         )
+        st.markdown(
+            "**To use a local model, run this app on your own computer.** It "
+            "takes about fifteen minutes once, and your hosted app keeps working "
+            "exactly as it does now.\n\n"
+            "1. Install **Ollama** from "
+            "[ollama.com/download](https://ollama.com/download) and open it once.\n"
+            "2. Download the project from GitHub — green **Code** button → "
+            "**Download ZIP** — and unzip it.\n"
+            "3. Double-click **`scripts/mac_setup.command`** (or "
+            "`scripts/windows_setup.bat` on a PC). It installs everything and "
+            "starts the app in your browser.\n\n"
+            "`docs/LOCAL_MODELS.md` has the same steps with more detail, plus "
+            "which model size fits your machine."
+        )
+        st.info(
+            "In the meantime, **openrouter/free** costs nothing and works here. "
+            "It is the default for exactly this reason.",
+            icon="💡",
+        )
+        return preference(user, "local_base_url", DEFAULT_BASE_URL), saved_model
 
     base_url = st.text_input(
         "Server address",
@@ -451,7 +473,7 @@ def local_model_picker(user: User, saved_model: str) -> tuple[str, str]:
         st.error(server["status"], icon="🔌")
         st.caption(
             "Install Ollama from [ollama.com/download](https://ollama.com/download), "
-            "then run `ollama pull qwen3:8b` in a terminal. Full instructions, "
+            "then run `ollama pull qwen2.5:14b` in a terminal. Full instructions, "
             "including Windows, are in `docs/LOCAL_MODELS.md`."
         )
         # Still hand back whatever was typed: the address is worth keeping even

@@ -1,6 +1,6 @@
 # Fingerprints of the files this build runs. Regenerate with
 # python3 scripts/make_manifest.py after changing any of them.
-6126b391f27da15d1efb421190711c27a718455f2dde159ba5013568f9c19e3c  app.py
+8c8c368ea0689e8ada64aba68c7ae9bbe39e5d10065c14c299c076ab41b1453a  app.py
 464d6d8de1bb83cdad825b25000fa6af09a026f07fec4789513099e1d59e1eb6  src/__init__.py
 65e5ceb345bb6398bc75959bce41357c748879fecfe2f905321ef9d39389f7c5  src/accounts.py
 46b5caf3702e416ec4eef052c0b9c6266b00fad87b5a596e3943d4db734ba39c  src/appconfig.py
@@ -19,7 +19,7 @@ fdc2d52203e398461f370051ba4219fe57af7c9c917bf794b75c5d2c44289108  src/hostinfo.p
 9e3bf15401d6abe8a3091f49fd92aba0d9abd77ad59e6e4b17f594949783cc3e  src/keymgmt.py
 94ce086c92784e5f1a10c6ce507834c25be78c3479a5dfd990fa60dbaa102452  src/library.py
 a3cf0fbbacfba42cdbebd0ea78ccfba7cad2e7229cadc272ae3ed41ce4e1d450  src/llm.py
-67f3dde65500e97fe7f14eb40cb972f7f1c5cab2bb11c2cdd4641f604b422644  src/localmodels.py
+eaefd4d90343e6e28ba156d8681d43830e0aeebc07454b8d6f3decd318bcfebb  src/localmodels.py
 d3b876f63ce4a477dcd1ba705eec2ae360026bcbc90500ffc745f180b4019895  src/materials.py
 e780d82809a6fa6597e7589df2986890f4a22d831f1dfef6a6b2f0c4aa433fab  src/mcq.py
 652c86a561bb453a9ed61c06279209d0dfc7f0f0bcd0f87685451487c04e898f  src/openrouter_catalog.py
