@@ -127,17 +127,37 @@ def test_the_free_router_is_the_default_model():
     assert AppSettings().llm_model in PROVIDERS["openrouter"].models
 
 
-def test_all_five_providers_are_registered():
-    assert set(PROVIDERS) == {"gemini", "anthropic", "openai", "xai", "openrouter"}
+def test_every_provider_is_registered():
+    assert set(PROVIDERS) == {
+        "gemini", "anthropic", "openai", "xai", "openrouter", "local",
+    }
 
 
 def test_every_provider_is_completely_specified():
+    """Two things are conditional on where the model runs, and only two.
+
+    A server on the user's own machine has no credential to name, and no model
+    list to ship — what is installed differs on every machine. Everything else
+    holds for every provider, the local one included.
+    """
     for key, spec in PROVIDERS.items():
         assert spec.key == key
         assert spec.sdk in {"gemini", "anthropic", "openai"}
-        assert spec.env_var.endswith("_API_KEY")
-        assert spec.models, f"{key} has no models"
         assert spec.console_url.startswith("https://")
+
+        if spec.requires_key:
+            assert spec.env_var.endswith("_API_KEY")
+            assert spec.models, f"{key} has no models"
+        else:
+            assert spec.is_local, "only a server on this machine may skip the key"
+            assert spec.env_var == "", "a variable nothing reads is a false promise"
+
+
+def test_only_a_local_provider_is_keyless():
+    """A hosted provider quietly dropping its key requirement would be a
+    security change wearing the clothes of a convenience."""
+    assert {k for k, p in PROVIDERS.items() if not p.requires_key} == {"local"}
+    assert PROVIDERS["local"].base_url.startswith("http://localhost")
 
 
 def test_openai_compatible_providers_have_distinct_base_urls():
@@ -170,10 +190,15 @@ def test_api_key_resolution_prefers_explicit_key(monkeypatch):
 
 
 def test_each_provider_reads_its_own_env_var(monkeypatch):
-    for key, spec in PROVIDERS.items():
+    keyed = {k: p for k, p in PROVIDERS.items() if p.requires_key}
+    for key, spec in keyed.items():
         monkeypatch.setenv(spec.env_var, f"key-for-{key}")
-    for key, spec in PROVIDERS.items():
+    for key in keyed:
         assert AppSettings(provider=key).resolved_api_key() == f"key-for-{key}"
+
+
+def test_a_local_provider_resolves_no_key_and_does_not_crash_trying():
+    assert AppSettings(provider="local").resolved_api_key() == ""
 
 
 def test_every_curated_model_has_a_price():

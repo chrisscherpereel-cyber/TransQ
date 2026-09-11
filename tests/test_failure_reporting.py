@@ -232,15 +232,49 @@ def test_when_every_summary_call_fails_the_run_stops(transcript):
     assert report.dominant_cause() == CAUSE_AUTH
 
 
-def test_a_failed_synthesis_is_recorded_before_it_raises(transcript):
+def test_a_failed_synthesis_is_recorded_and_then_worked_around(transcript):
+    """Synthesis is one call over material that has already been paid for.
+
+    It used to take every section summary down with it, which is the expensive
+    way to fail: the sections were bought and then thrown away. Now the failure
+    is still recorded — the instructor has to be told the good summary was not
+    written — but the sections are collated locally rather than discarded.
+    """
+    report = RunReport()
+    summary, _, sections = summarize_transcript(
+        FailingLLM(RuntimeError("500 server error"), fail_on="reduce"),
+        transcript, report=report,
+    )
+
+    synthesis = [s for s in report.phase_steps(PHASE_SUMMARY) if "synthesis" in s.label]
+    assert synthesis and synthesis[0].is_failure, "the failure must not be hidden"
+
+    assert summary.key_points, "the paid-for sections must survive the failed call"
+    assert sections, "and be handed back, so a re-run does not buy them again"
+    assert any(
+        "assembled locally" in s.label for s in report.phase_steps(PHASE_SUMMARY)
+    ), "this summary is plainer than a synthesized one; the report should say so"
+
+
+def test_a_failed_synthesis_with_nothing_to_salvage_still_raises(transcript):
+    """The fallback is only a fallback when there is something to fall back on.
+
+    Sections that came back empty give an empty local summary, and returning
+    that silently is the original bug — a run that "finished" with nothing in it.
+    """
+
+    class EmptySections(FailingLLM):
+        def complete_json(self, system, user, max_tokens=None):
+            if "Below is one segment" in user:
+                return {"heading": "", "key_points": [], "key_terms": []}
+            return FailingLLM.complete_json(self, system, user, max_tokens)
+
     report = RunReport()
     with pytest.raises(Exception):
         summarize_transcript(
-            FailingLLM(RuntimeError("500 server error"), fail_on="reduce"),
+            EmptySections(RuntimeError("500 server error"), fail_on="reduce"),
             transcript, report=report,
         )
-    synthesis = [s for s in report.phase_steps(PHASE_SUMMARY) if "synthesis" in s.label]
-    assert synthesis and synthesis[0].is_failure
 
 
 # --------------------------------------------------------------------------- #

@@ -72,6 +72,14 @@ class Provider:
     allow_custom_model: bool = False
     console_url: str = ""
     note: str = ""
+    # A model running on this machine needs no credential, and demanding one
+    # would be a fake gate in front of a service that does not check it.
+    requires_key: bool = True
+    # True when the endpoint lives on the same machine as the app. The UI keys
+    # its "this cannot reach your laptop from Streamlit Cloud" explanation off
+    # this flag rather than off the provider's name, so a second local runner
+    # would inherit the warning rather than needing it written again.
+    is_local: bool = False
 
 
 # OpenRouter's Free Models Router. It reads each request, filters to free models
@@ -160,6 +168,31 @@ PROVIDERS: dict[str, Provider] = {
         console_url="https://console.x.ai",
         note="OpenAI-compatible endpoint at api.x.ai.",
     ),
+    "local": Provider(
+        key="local",
+        label="On this computer",
+        sdk="openai",
+        env_var="",  # nothing to configure; the server does not check one
+        # Only a placeholder. The real list is read from the server itself in
+        # src/localmodels.py, because what is installed differs on every machine
+        # and local model names change monthly — a curated list here would offer
+        # models the user does not have and miss the ones they do.
+        models=(),
+        base_url="http://localhost:11434/v1",
+        # Small models honour response_format unevenly, and a refusal costs a
+        # whole request. The prompt asks for JSON and src/llm.py salvages it,
+        # which is the same approach that already carries OpenRouter.
+        supports_json_mode=False,
+        allow_custom_model=True,
+        requires_key=False,
+        is_local=True,
+        console_url="https://ollama.com/download",
+        note=(
+            "Ollama or LM Studio on your own machine. Free and private, but only "
+            "reachable when the app runs on that same machine — see "
+            "docs/LOCAL_MODELS.md."
+        ),
+    ),
 }
 
 DEFAULT_PROVIDER = "openrouter"
@@ -229,8 +262,16 @@ def get_secret(name: str, default: str = "") -> str:
 
 
 def available_providers() -> list[str]:
-    """Provider keys that already have a key configured, default first."""
-    return [k for k, p in PROVIDERS.items() if get_secret(p.env_var)]
+    """Provider keys that are ready to use without further configuration.
+
+    A local server needs no credential, so requiring one before listing it would
+    hide the only provider that is always free.
+    """
+    return [
+        k
+        for k, p in PROVIDERS.items()
+        if not p.requires_key or get_secret(p.env_var)
+    ]
 
 
 @dataclass
@@ -254,6 +295,10 @@ class AppSettings:
     llm_model: str = PROVIDERS[DEFAULT_PROVIDER].models[0]
     api_key: str = ""
     temperature: float = 0.3
+    # Where a local model server is listening. Editable because the port depends
+    # on which runner is installed (11434 Ollama, 1234 LM Studio) and because
+    # people do move it.
+    local_base_url: str = "http://localhost:11434/v1"
 
     # Quiz shape
     num_questions: int = 10

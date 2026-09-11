@@ -142,8 +142,13 @@ def fake_anthropic(monkeypatch, rec):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.parametrize("provider", list(PROVIDERS))
+@pytest.mark.parametrize(
+    "provider", [k for k, p in PROVIDERS.items() if p.requires_key]
+)
 def test_missing_key_names_the_right_env_var(provider):
+    """Every provider that authenticates must say which variable to set and
+    where to get a key. A local server authenticates nothing, so it is excluded
+    here and covered in test_local_models.py instead."""
     with pytest.raises(LLMError) as exc:
         LLMClient(provider=provider, model="m", api_key="")
     assert PROVIDERS[provider].env_var in str(exc.value)

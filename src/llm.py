@@ -70,6 +70,12 @@ class Usage:
 # OpenRouter dashboard for the actual spend. Any slug not listed here (including
 # anything you type into the custom-model box) shows tokens but no dollar figure,
 # which is the honest answer rather than a fabricated one.
+# A local model on a laptop can spend several minutes on one long chunk, where a
+# hosted model would take seconds. Fifteen minutes is generous enough that a slow
+# machine finishes rather than being cut off one call at a time, and short enough
+# that a genuinely hung server does not hold the run open all afternoon.
+LOCAL_TIMEOUT_SECONDS = 900.0
+
 PRICING: dict[str, tuple[float, float]] = {
     # OpenRouter (approximate — see note above)
     # The Free Models Router only ever routes to free models, so this is an
@@ -140,10 +146,13 @@ class LLMClient:
     # This is what lets the sidebar count up during a run instead of only at the
     # end; rate is None when the model has no published price.
     on_usage: Callable[[int, int, tuple[float, float] | None], None] | None = None
+    # Overrides the provider's built-in address. Only local servers need this —
+    # the port depends on which runner is installed, and people move it.
+    base_url_override: str = ""
 
     def __post_init__(self) -> None:
         self.spec: Provider = get_provider(self.provider)
-        if not self.api_key:
+        if self.spec.requires_key and not self.api_key:
             raise LLMError(
                 f"No API key for {self.spec.label}. Add it in the sidebar, or set "
                 f"{self.spec.env_var} in your Streamlit secrets. "
@@ -175,9 +184,21 @@ class LLMClient:
                 from openai import OpenAI
             except ImportError as exc:  # pragma: no cover
                 raise LLMError("pip install openai") from exc
-            kwargs: dict[str, Any] = {"api_key": self.api_key}
+            kwargs: dict[str, Any] = {"api_key": self.api_key or "not-needed"}
             if self.spec.base_url:
                 kwargs["base_url"] = self.spec.base_url
+            if self.base_url_override:
+                kwargs["base_url"] = self.base_url_override
+            if self.spec.is_local:
+                # A local model generates far slower than a hosted one — minutes
+                # for a long chunk on a laptop, against seconds over an API — and
+                # the SDK's default timeout would abandon a request that was
+                # going to succeed. Retries are dropped to one because a local
+                # server that failed is not a busy server that will recover; it
+                # is a machine out of memory, and asking again just makes the
+                # user wait through the same failure.
+                kwargs["timeout"] = LOCAL_TIMEOUT_SECONDS
+                kwargs["max_retries"] = 0
             if self.spec.key == "openrouter":
                 # Optional attribution headers OpenRouter uses for its leaderboard.
                 kwargs["default_headers"] = {
@@ -196,7 +217,12 @@ class LLMClient:
         """Record one call's tokens and notify any live meter watching."""
         self.usage.add(Usage(input_tokens, output_tokens, 1))
         if self.on_usage is not None:
-            self.on_usage(input_tokens, output_tokens, PRICING.get(self.model))
+            # A model on your own machine bills nothing, whatever it is called.
+            # Stating that as an exact zero is what makes the meter read "$0.00"
+            # rather than "no published price" — which reads like a gap in the
+            # app's knowledge instead of the actual answer.
+            rate = (0.0, 0.0) if self.spec.is_local else PRICING.get(self.model)
+            self.on_usage(input_tokens, output_tokens, rate)
 
     @retry(
         retry=retry_if_exception_type(TransientLLMError),

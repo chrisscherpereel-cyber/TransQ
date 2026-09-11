@@ -88,7 +88,12 @@ from src.storage import (
     dropbox_credentials,
 )
 from src.summarize import summarize_transcript
-from src.hostinfo import available_memory_gb, check_model_fits, describe_host
+from src.hostinfo import (
+    available_memory_gb,
+    check_model_fits,
+    describe_host,
+    is_ephemeral_host,
+)
 from src.transcribe import (
     TranscriptionError,
     estimate_transcription_minutes,
@@ -379,6 +384,89 @@ def preference(user: User | None, key: str, default):
     if user is None:
         return default
     return user.settings.get(key, default)
+
+
+@st.cache_data(ttl=20, show_spinner=False)
+def probe_local_server(base_url: str, nonce: int) -> dict:
+    """Ask a local server what it has, briefly cached.
+
+    Cached because the sidebar re-runs on every widget interaction and probing a
+    dead port on each keystroke makes the whole page feel broken. Twenty seconds
+    is short enough that starting Ollama and pressing the button feels immediate;
+    ``nonce`` lets that button bypass the cache outright.
+    """
+    from src.localmodels import probe
+
+    server = probe(base_url)
+    return {
+        "base_url": server.base_url,
+        "reachable": server.reachable,
+        "models": server.models,
+        "status": server.status_line(),
+        "usable": server.is_usable,
+    }
+
+
+def local_model_picker(user: User, saved_model: str) -> tuple[str, str]:
+    """Address of the local server, and the model chosen from what it reports.
+
+    Returns ``(base_url, model)``. The model list is never hardcoded — it is
+    whatever that machine has downloaded, which is the only list that can be
+    right.
+    """
+    from src.localmodels import DEFAULT_BASE_URL, guidance, normalise
+
+    # The one thing that must be said before anything else. On Streamlit Cloud
+    # "localhost" is Streamlit's container, not the user's laptop, and no
+    # setting can bridge that. Saying so here saves an afternoon of debugging a
+    # connection that cannot exist.
+    if is_ephemeral_host():
+        st.warning(
+            "**This app is running on Streamlit's servers, so it cannot reach a "
+            "model on your computer.** `localhost` here means Streamlit's own "
+            "machine. To use a local model, run the app on the same computer as "
+            "the model — `docs/LOCAL_MODELS.md` has the steps.",
+            icon="🌐",
+        )
+
+    base_url = st.text_input(
+        "Server address",
+        value=preference(user, "local_base_url", DEFAULT_BASE_URL),
+        help="Ollama listens on port 11434, LM Studio on 1234. A bare host or a "
+        "missing /v1 is fine — it gets tidied up.",
+        key="local_base_url_field",
+    )
+    base_url = normalise(base_url)
+
+    left, right = st.columns([1, 1])
+    with left:
+        if st.button("Check again", use_container_width=True, key="local_recheck"):
+            st.session_state.local_nonce = st.session_state.get("local_nonce", 0) + 1
+    with right:
+        st.caption(guidance(available_memory_gb()))
+
+    server = probe_local_server(base_url, st.session_state.get("local_nonce", 0))
+
+    if not server["usable"]:
+        st.error(server["status"], icon="🔌")
+        st.caption(
+            "Install Ollama from [ollama.com/download](https://ollama.com/download), "
+            "then run `ollama pull qwen3:8b` in a terminal. Full instructions, "
+            "including Windows, are in `docs/LOCAL_MODELS.md`."
+        )
+        # Still hand back whatever was typed: the address is worth keeping even
+        # when the server is down, so it is not retyped once it is running.
+        return base_url, saved_model
+
+    st.success(server["status"], icon="✅")
+    options = list(server["models"])
+    index = options.index(saved_model) if saved_model in options else 0
+    model = st.selectbox("Model", options, index=index, key="local_model_choice")
+    st.caption(
+        "Runs entirely on this machine. Nothing about the lecture is sent "
+        "anywhere, and there is no per-lecture cost."
+    )
+    return base_url, model
 
 
 def openrouter_model_picker(default_slug: str) -> str:
@@ -764,10 +852,17 @@ def sidebar(directory: UserDirectory, user: User) -> AppSettings:
             if spec.note:
                 st.caption(spec.note)
 
-            saved_model = preference(user, "llm_model", spec.models[0])
+            # A local provider ships no model list — what is installed differs
+            # on every machine — so there is no first entry to fall back to.
+            first_model = spec.models[0] if spec.models else ""
+            saved_model = preference(user, "llm_model", first_model)
             if s.provider == "openrouter":
                 s.llm_model = openrouter_model_picker(
-                    saved_model if saved_provider == s.provider else spec.models[0]
+                    saved_model if saved_provider == s.provider else first_model
+                )
+            elif spec.is_local:
+                s.local_base_url, s.llm_model = local_model_picker(
+                    user, saved_model if saved_provider == s.provider else ""
                 )
             else:
                 options = list(spec.models)
@@ -778,7 +873,12 @@ def sidebar(directory: UserDirectory, user: User) -> AppSettings:
                     key=f"model_{s.provider}",
                 )
 
-            s.api_key = account_key_controls(directory, user, s.provider)
+            # A server on your own machine has nothing to authenticate against,
+            # so asking for a key would be a box that does nothing.
+            s.api_key = (
+                "" if not spec.requires_key
+                else account_key_controls(directory, user, s.provider)
+            )
 
             framing_keys = list(QUESTION_FRAMING)
             saved_framing = preference(user, "framing", DEFAULT_FRAMING)
@@ -1020,16 +1120,22 @@ def remember_model_used(user: User, s: AppSettings) -> None:
     choice. Writes only when something changed, since this runs after every
     generation and each write is a round trip to storage.
     """
-    if (
-        preference(user, "llm_model", None) == s.llm_model
-        and preference(user, "provider", None) == s.provider
-    ):
+    changes: dict[str, str] = {}
+    if preference(user, "llm_model", None) != s.llm_model:
+        changes["llm_model"] = s.llm_model
+    if preference(user, "provider", None) != s.provider:
+        changes["provider"] = s.provider
+    # The server address rides along: someone who moved Ollama off its default
+    # port should type that once, not once per sign-in.
+    if get_provider(s.provider).is_local and preference(
+        user, "local_base_url", None
+    ) != s.local_base_url:
+        changes["local_base_url"] = s.local_base_url
+    if not changes:
         return
     try:
         _, directory, _, _, _, _ = get_backend()
-        directory.save_settings(
-            user.username, {"provider": s.provider, "llm_model": s.llm_model}
-        )
+        directory.save_settings(user.username, changes)
         user.settings.update({"provider": s.provider, "llm_model": s.llm_model})
     except (AuthError, StorageError):
         # A preference that failed to save is not worth interrupting a finished
@@ -1051,6 +1157,7 @@ def save_settings(directory: UserDirectory, user: User, s: AppSettings) -> None:
                 "difficulty_mix": s.difficulty_mix,
                 "course_context": s.course_context,
                 "framing": s.framing,
+                "local_base_url": s.local_base_url,
             },
         )
         st.session_state.user = directory.get(user.username)
@@ -1457,11 +1564,13 @@ def run_transcript_import(uploaded, user: User) -> None:
 
 def build_client(settings: AppSettings) -> LLMClient | None:
     try:
+        spec = get_provider(settings.provider)
         return LLMClient(
             provider=settings.provider,
             model=settings.llm_model,
             api_key=settings.resolved_api_key(),
             temperature=settings.temperature,
+            base_url_override=settings.local_base_url if spec.is_local else "",
         )
     except LLMError as exc:
         st.error(str(exc))
@@ -2548,13 +2657,33 @@ def review_tab(settings: AppSettings, user: User) -> None:
             "mishearing a number or a term — not you."
         )
 
-    if st.button(
-        "🔍 Review this lecture", type="primary", use_container_width=False
-    ):
+    # How much of the lecture this review actually covers. A partial review
+    # presented as a whole one is worse than no review: the instructor reads
+    # "nothing flagged" and takes it to mean the lecture is clear, when half of
+    # it was never read.
+    pending: list = []
+    if result is not None and st.session_state.chunks:
+        pending = result.pending(st.session_state.chunks)
+
+    label = "🔍 Review this lecture"
+    if pending:
+        label = f"↩️ Finish the review — {len(pending)} window(s) left"
+    elif result is not None:
+        label = "🔍 Review again"
+
+    if st.button(label, type="primary", use_container_width=False):
         run_consistency_review(settings, user)
 
     if result is None:
         return
+
+    if pending:
+        st.warning(
+            f"**This review is incomplete.** {result.checked_windows} window(s) "
+            f"were read and {len(pending)} were not, so the findings below cover "
+            "part of the lecture. Nothing already read will be paid for again.",
+            icon="⚠️",
+        )
 
     st.divider()
     st.markdown(f"**{result.headline()}**")
@@ -2627,6 +2756,27 @@ def run_consistency_review(settings: AppSettings, user: User) -> None:
         return
     meter = attach_meter(client, settings)
 
+    # Whatever an earlier attempt got through. Windows it already read are
+    # skipped rather than paid for a second time.
+    previous = st.session_state.get("review_result")
+    if previous is not None and previous.pending(chunks):
+        st.caption(
+            f"Resuming: {previous.checked_windows} window(s) already reviewed "
+            f"will be kept, {len(previous.pending(chunks))} still to read."
+        )
+
+    def keep(partial: ReviewResult) -> None:
+        """Save after every window, not at the end.
+
+        The run that most needs this is the one with no end — and unlike the
+        summary, a review is the whole deliverable of its tab, so losing it
+        loses everything the instructor came here for.
+        """
+        partial.reviewed_at = dt.datetime.now(dt.timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        st.session_state.review_result = partial
+
     bar = st.progress(0.0, text="Reading the lecture…")
     report = RunReport()
     try:
@@ -2635,12 +2785,24 @@ def run_consistency_review(settings: AppSettings, user: User) -> None:
             chunks,
             material=st.session_state.get("material"),
             exam_topics=examinable_topics(),
+            previous=previous,
+            on_window=keep,
             progress=lambda f, m: bar.progress(min(1.0, f), text=m),
             report=report,
         )
     except LLMError as exc:
         bar.empty()
         st.error(f"**The review stopped early.** {exc}", icon="🛑")
+        kept = st.session_state.get("review_result")
+        if kept is not None and kept.checked_windows:
+            st.info(
+                f"**The {kept.checked_windows} window(s) already read are kept** "
+                "and are shown below. Running the review again picks up from the "
+                "next one rather than starting over.",
+                icon="↩️",
+            )
+            st.session_state.run_report = report
+            update_saved_lecture(user)
         return
     finally:
         commit_usage(meter, user, "review")

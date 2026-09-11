@@ -36,10 +36,11 @@ part 3 ─┘    (sequential)       (one timeline)         │
 | **Supporting material** | Optionally upload the lecture's own slides or handout (PPTX, PDF, DOCX, text). Speaker notes are read too. A transcript records what was *said*; the deck restores what was *shown* — the term the audio renders as "this thing here" |
 | **Exam topics** | Optionally list the topics you will actually test. They outrank everything the app infers about importance, steering both where questions are placed and what each request is told to aim at |
 | **Summarize** | Map-reduce over 10-minute windows so a 75-minute lecture gets even attention: title, abstract, learning objectives, key points, timestamped outline, key terms — informed by the deck's structure and your exam topics when supplied. **Resumable**: every window that finishes is kept, so a run that fails partway carries on from the next one instead of starting over and charging twice |
-| **Generate** | Questions are placed by **importance, not by the clock**: the summary's objectives and key points decide which parts of the lecture are worth examining, so admin and tangents are quieted and the argument carries the quiz. Each item carries its timestamp and a verbatim supporting quote. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
+| **Generate** | Questions are placed by **importance, not by the clock**: the summary's objectives and key points decide which parts of the lecture are worth examining. A window that matches nothing — opening logistics, an anecdote, "see you Thursday" — is skipped entirely rather than given a token question, so the argument carries the quiz. Each item carries its timestamp and a verbatim supporting quote. Provider is a dropdown: OpenRouter, Gemini, Claude, OpenAI, Grok |
 | **Wording** | Choose how stems are framed: **standalone** (default — asks the question directly, no "according to the lecture", reusable across a whole unit), reference the lecture, or an applied scenario. Provenance is unaffected: the timestamp and supporting quote are still recorded on every item |
 | **Review** | An automatic second pass critiques the drafts and repairs or drops weak items |
-| **Consistency check** | A separate 🔍 Review tab reads the lecture and flags claims worth checking again — against your uploaded slides (reliable: both texts are supplied) and against the model's general knowledge (advisory only). Transcription errors are reported separately, because most claims that look wrong in an automatic transcript are Whisper mishearing a term |
+| **Run it locally** | Point the app at a model on your own machine (Ollama or LM Studio) instead of a hosted API. Free, offline, and the lecture text never leaves the computer — which changes the FERPA calculus for class recordings. Only works when the app runs on that machine too; `docs/LOCAL_MODELS.md` has Mac and Windows instructions |
+| **Consistency check** | A separate 🔍 Review tab reads the lecture and flags claims worth checking again. Resumable like the rest: a failure partway keeps every window already read, and the tab says plainly when a review covers only part of the lecture — against your uploaded slides (reliable: both texts are supplied) and against the model's general knowledge (advisory only). Transcription errors are reported separately, because most claims that look wrong in an automatic transcript are Whisper mishearing a term |
 | **Validate** | Mechanical checks for "all of the above", duplicate options, giveaway answer length, negative stems, near-duplicate questions, missing provenance |
 | **Balance** | Correct answers are redistributed across A/B/C/D — LLMs have a strong positional bias students notice fast |
 | **Edit** | Every stem, option, and answer key is editable in the browser before export |
@@ -632,7 +633,8 @@ lecture-quiz-builder/
 │   ├── config.py                 settings, model catalogs, secret resolution
 │   ├── transcribe.py             faster-whisper wrapper, multi-part stitching
 │   ├── chunking.py               time-window splitting, question allocation
-│   ├── llm.py                    five-provider abstraction, retries, cost
+│   ├── llm.py                    six-provider abstraction, retries, cost
+│   ├── localmodels.py            finding and listing a model on this machine
 │   ├── buildinfo.py              is this running the code that was shipped?
 │   ├── openrouter_catalog.py     live model list: fetch, filter, sort, free flags
 │   ├── storage.py                encrypted Store: local files and Dropbox
@@ -660,7 +662,8 @@ lecture-quiz-builder/
 ├── docs/
 │   ├── DROPBOX.md                step-by-step encrypted-storage setup
 │   ├── DEPLOY_NOTES.md           why there is no packages.txt
-│   └── UPDATING.md               replacing a deployed copy without half-copying it
+│   ├── UPDATING.md               replacing a deployed copy without half-copying it
+│   └── LOCAL_MODELS.md           running the questions on your own computer
 ├── scripts/
 │   ├── rotate_key.py             re-encrypt everything under a new APP_SECRET
 │   ├── setup_dropbox.py          interactive OAuth: prints a secrets block
@@ -690,6 +693,7 @@ lecture-quiz-builder/
     ├── test_summary_resume.py       resuming a summary, salvage, local fallback
     ├── test_deploy_integrity.py     app.py and src/ must be the same vintage
     ├── test_build_fingerprints.py   catching a stale file that still imports
+    ├── test_local_models.py         discovery, keyless clients, zero pricing
     └── test_hostinfo.py             memory detection and the model-fit verdicts
 ```
 
@@ -700,7 +704,7 @@ lecture-quiz-builder/
 see `docs/UPDATING.md`, which is worth reading once before your first update.
 
 ```bash
-pytest -q          # 536 tests, no API keys or network needed
+pytest -q          # 588 tests, no API keys or network needed
 ```
 
 ---

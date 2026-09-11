@@ -281,3 +281,122 @@ def test_a_review_round_trips_through_storage(chunks):
 def test_a_malformed_stored_review_degrades_to_empty():
     assert ReviewResult.from_dict({}).findings == []
     assert ReviewResult.from_dict({"findings": ["nope"]}).findings == []
+
+
+# --------------------------------------------------------------------------- #
+# Resuming a review
+# --------------------------------------------------------------------------- #
+#
+# A review of a 75-minute lecture is seven or eight model calls, and the findings
+# used to live in a local variable until the last one returned — so a failure at
+# window six discarded five windows that had already been read and billed, with
+# no way forward but to buy them again. The reported symptom: "when AI fails
+# during the review we are losing the finished results and have to start another
+# review from scratch."
+#
+# The properties below are the same three that make summarization resumable, and
+# one more that only matters here: a *partial* review must never be presented as
+# a whole one. "Nothing flagged" across half a lecture is worse than no review,
+# because it reads as reassurance.
+
+
+def test_each_window_is_handed_back_as_it_lands(chunks):
+    many = [
+        Chunk(index=i, start=i * 600.0, end=(i + 1) * 600.0, text=TRANSCRIPT * 20)
+        for i in range(4)
+    ]
+    seen: list[int] = []
+    client = ReviewingLLM([{"claim": "a", "verdict": "contested"}])
+
+    review_transcript(client, many, on_window=lambda r: seen.append(len(r.findings)))
+
+    assert seen == [1, 2, 3, 4], "the result grows; it is not delivered only at the end"
+
+
+def test_a_failed_window_leaves_the_finished_ones_behind():
+    """The reported bug. Window three dies; windows one and two must survive."""
+    many = [
+        Chunk(index=i, start=i * 600.0, end=(i + 1) * 600.0, text=TRANSCRIPT * 20)
+        for i in range(4)
+    ]
+
+    class DiesPartway(ReviewingLLM):
+        def complete_json(self, system, user, max_tokens=None):
+            self.calls += 1
+            if self.calls > 2:
+                raise RuntimeError("429 rate limit exceeded")
+            return {"findings": [{"claim": f"c{self.calls}", "verdict": "contested"}]}
+
+    kept: list = []
+    result = review_transcript(DiesPartway(), many, on_window=kept.append)
+
+    assert len(result.findings) == 2, "two windows were read and paid for"
+    assert kept, "and were handed back before the failures"
+    assert result.reviewed_labels == [many[0].label, many[1].label]
+
+
+def test_a_resumed_review_only_reads_what_is_left():
+    many = [
+        Chunk(index=i, start=i * 600.0, end=(i + 1) * 600.0, text=TRANSCRIPT * 20)
+        for i in range(4)
+    ]
+    first = ReviewingLLM([{"claim": "early", "verdict": "contested"}])
+    partial = review_transcript(first, many[:2])
+    assert first.calls == 2
+
+    second = ReviewingLLM([{"claim": "late", "verdict": "outdated"}])
+    finished = review_transcript(second, many, previous=partial)
+
+    assert second.calls == 2, "only the two unread windows cost anything"
+    assert finished.checked_windows == 4
+    assert len(finished.findings) == 4, "earlier findings are carried forward"
+    assert not finished.pending(many)
+
+
+def test_a_reused_window_is_reported_as_skipped(chunks):
+    from src.diagnostics import RunReport
+
+    from src.factcheck import PHASE_REVIEW_CLAIMS
+
+    done = review_transcript(ReviewingLLM([]), chunks)
+    report = RunReport()
+    review_transcript(ReviewingLLM([]), chunks, previous=done, report=report)
+
+    skipped = [s for s in report.phase_steps(PHASE_REVIEW_CLAIMS) if s.status == "skipped"]
+    assert len(skipped) == len(chunks)
+    assert all("earlier attempt" in s.detail for s in skipped)
+
+
+def test_pending_names_the_windows_still_to_read(chunks):
+    many = [
+        Chunk(index=i, start=i * 600.0, end=(i + 1) * 600.0, text=TRANSCRIPT * 20)
+        for i in range(3)
+    ]
+    partial = review_transcript(ReviewingLLM([]), many[:1])
+    assert [c.label for c in partial.pending(many)] == [many[1].label, many[2].label]
+
+
+def test_coverage_survives_being_saved_and_reopened(chunks):
+    """Otherwise reopening a lecture would present a half-read review as whole."""
+    partial = review_transcript(ReviewingLLM([{"claim": "a"}]), chunks)
+    restored = ReviewResult.from_dict(partial.to_dict())
+    assert restored.reviewed_labels == partial.reviewed_labels
+    assert not restored.pending(chunks)
+
+
+def test_a_review_saved_before_resuming_existed_is_re_read_not_assumed_done(chunks):
+    """An older saved review has no window labels. Treating that as "all done"
+    would silently skip the whole lecture and report nothing flagged."""
+    legacy = ReviewResult.from_dict(
+        {"findings": [{"claim": "a", "verdict": "contested"}], "checked_windows": 1}
+    )
+    assert legacy.reviewed_labels == []
+    assert legacy.pending(chunks) == chunks
+
+
+def test_a_failing_checkpoint_does_not_sink_the_review(chunks):
+    def explode(result):
+        raise RuntimeError("session state is gone")
+
+    result = review_transcript(ReviewingLLM([{"claim": "a"}]), chunks, on_window=explode)
+    assert result.findings, "the window was read; a failed save must not undo that"

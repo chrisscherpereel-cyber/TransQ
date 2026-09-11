@@ -83,6 +83,13 @@ STOPWORDS = frozenset(
 # opinion, and it should not be able to silence ten minutes outright.
 FLOOR_WEIGHT = 0.15
 
+# Below this many windows scoring above zero, the scores are treated as
+# uninformative rather than as a verdict: a summary that is thin or oddly worded
+# can leave almost every window with no keyword overlap, and that looks identical
+# to a lecture with one good passage. Two is the smallest number that can express
+# a contrast at all.
+MIN_SCORING_WINDOWS = 2
+
 # No single window may hold more than this share of the quiz, however dense it
 # looks. Twelve questions about one ten-minute stretch is not a lecture quiz.
 MAX_SHARE = 0.45
@@ -207,8 +214,40 @@ def allocate_by_importance(
         return allocate_questions(num_questions, len(chunks))
 
     top = max(scores)
-    weights = [max(score, top * FLOOR_WEIGHT) for score in scores]
+    # The floor lifts a *quiet* window, not an empty one. A window that scored
+    # nothing at all — the opening five minutes of midterm logistics, the
+    # supplier anecdote, the "any questions? see you Thursday" — matched nothing
+    # in the summary because there is nothing in it to examine. Giving it the
+    # floor is how a quiz ends up with one question per ten minutes despite
+    # being weighted, which is the exact complaint importance weighting exists
+    # to answer. So an empty window is excluded outright, and the questions it
+    # would have taken go to windows that earned them.
+    #
+    # Nothing is lost when the lecture is uniformly dense: every window scores
+    # above zero, every window competes, and this changes nothing. Nor when the
+    # summary is missing entirely — that already falls back to even allocation
+    # above, because with no account of what mattered, the clock is the only
+    # information there is.
+    weights = [
+        max(score, top * FLOOR_WEIGHT) if score > 0 else 0.0 for score in scores
+    ]
+    live = sum(1 for w in weights if w > 0)
+
+    # The guard on all of that: excluding windows is only safe when the scoring
+    # is actually discriminating. Importance is keyword overlap against a summary
+    # the model wrote, and if that summary is thin or oddly worded, nearly every
+    # window scores zero — which is a failure of the scoring, not a lecture with
+    # one good minute in it. Below two surviving windows, distrust the scores and
+    # give everything the floor, exactly as before.
+    if live < MIN_SCORING_WINDOWS:
+        weights = [max(score, top * FLOOR_WEIGHT) for score in scores]
+        live = len(weights)
+
     cap = max(1, int(num_questions * MAX_SHARE))
+    # With few live windows the cap would block the quota, and the loop below
+    # would raise it one at a time; start it high enough to hold the target.
+    if live:
+        cap = max(cap, -(-num_questions // live))
 
     # Largest-remainder apportionment: proportional, integral, and it sums to
     # exactly the target — which matters, because the count is a promise.
@@ -217,8 +256,11 @@ def allocate_by_importance(
     counts = [min(cap, int(value)) for value in exact]
 
     remaining = num_questions - sum(counts)
+    # Leftovers go only to windows that scored. Without this filter the excluded
+    # windows would collect the remainder and quietly reappear in the quiz —
+    # the same one-per-window result, arrived at by a different route.
     order = sorted(
-        range(len(chunks)),
+        (i for i in range(len(chunks)) if weights[i] > 0),
         key=lambda i: (exact[i] - int(exact[i]), exact[i]),
         reverse=True,
     )

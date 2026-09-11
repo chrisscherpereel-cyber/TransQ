@@ -36,7 +36,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from . import prompts
-from .diagnostics import FAILED, OK, RunReport, classify, short_reason
+from .diagnostics import FAILED, OK, SKIPPED, RunReport, classify, short_reason
 from .llm import LLMClient, TruncatedResponseError, salvage_array_objects
 from .schema import Chunk, format_timestamp
 
@@ -132,6 +132,21 @@ class ReviewResult:
     checked_windows: int = 0
     model_used: str = ""
     reviewed_at: str = ""
+    # Which windows have actually been read. A count cannot answer "what is left
+    # to do" after a partial run — six of eight says nothing about *which* six —
+    # so resuming needs the labels, and they are what makes a second attempt
+    # skip finished work instead of paying for it twice.
+    reviewed_labels: list[str] = field(default_factory=list)
+
+    @property
+    def is_complete_for(self) -> str:
+        """Human-readable coverage, for a UI that must not imply a whole read."""
+        return f"{self.checked_windows} window(s) reviewed"
+
+    def pending(self, chunks: list[Any]) -> list[Any]:
+        """The windows this review has not covered yet."""
+        done = set(self.reviewed_labels)
+        return [c for c in chunks if getattr(c, "label", None) not in done]
 
     @property
     def attention(self) -> list[Finding]:
@@ -163,6 +178,7 @@ class ReviewResult:
             "checked_windows": self.checked_windows,
             "model_used": self.model_used,
             "reviewed_at": self.reviewed_at,
+            "reviewed_labels": list(self.reviewed_labels),
         }
 
     @classmethod
@@ -176,6 +192,12 @@ class ReviewResult:
             checked_windows=int(data.get("checked_windows") or 0),
             model_used=str(data.get("model_used") or ""),
             reviewed_at=str(data.get("reviewed_at") or ""),
+            # Absent in reviews saved before resuming existed. An empty list
+            # means "nothing known to be done", so an older saved review is
+            # re-read in full rather than being wrongly treated as finished.
+            reviewed_labels=[
+                str(x) for x in (data.get("reviewed_labels") or []) if str(x).strip()
+            ],
         )
 
 
@@ -184,6 +206,8 @@ def review_transcript(
     chunks: list[Chunk],
     material: Any = None,
     exam_topics: list[str] | None = None,
+    previous: "ReviewResult | None" = None,
+    on_window: Callable[["ReviewResult"], None] | None = None,
     progress: ProgressFn | None = None,
     report: RunReport | None = None,
 ) -> ReviewResult:
@@ -192,9 +216,24 @@ def review_transcript(
     Windows are reviewed independently, like summarization, so one failed call
     costs one window rather than the whole review — and so a long lecture never
     needs a single enormous request.
+
+    **Resumable**, for the same reason generation and summarization are. A review
+    of a 75-minute lecture is seven or eight model calls, and the findings used
+    to live in a local variable until the last one returned: a failure at window
+    six threw away five windows that had already been read and paid for, and the
+    only way forward was to buy them again. Now ``previous`` carries what an
+    earlier attempt finished — those windows are skipped, not re-requested — and
+    ``on_window`` hands the growing result back as each one lands, so a run that
+    never reaches the end still leaves its work behind.
     """
     report = report or RunReport()
     result = ReviewResult(model_used=getattr(client, "model", ""))
+    if previous is not None:
+        result.findings.extend(previous.findings)
+        result.reviewed_labels = list(previous.reviewed_labels)
+        result.checked_windows = previous.checked_windows
+    done_labels = set(result.reviewed_labels)
+
     if not chunks:
         return result
 
@@ -209,6 +248,12 @@ def review_transcript(
         )
 
     for i, chunk in enumerate(chunks):
+        if chunk.label in done_labels:
+            report.record(
+                PHASE_REVIEW_CLAIMS, chunk.label, SKIPPED,
+                detail="already reviewed in an earlier attempt",
+            )
+            continue
         if progress:
             progress(i / max(1, len(chunks)), f"Reviewing {chunk.label}")
 
@@ -256,14 +301,33 @@ def review_transcript(
 
         result.findings.extend(found)
         result.checked_windows += 1
+        result.reviewed_labels.append(chunk.label)
         report.record(
             PHASE_REVIEW_CLAIMS, chunk.label, OK, produced=len(found)
         )
+        _checkpoint(on_window, result)
 
     result.findings.sort(key=lambda f: (f.rank, f.timestamp))
     if progress:
         progress(1.0, result.headline())
     return result
+
+
+def _checkpoint(
+    on_window: Callable[[ReviewResult], None] | None, result: ReviewResult
+) -> None:
+    """Hand the growing result back the moment a window lands.
+
+    Returning it at the end is no use to a run that never reaches the end, and
+    every window is a paid-for model call. A caller whose save fails must not
+    take the review down with it — the window was read either way.
+    """
+    if on_window is None:
+        return
+    try:
+        on_window(result)
+    except Exception:  # noqa: BLE001 - a failed save is not a failed window
+        pass
 
 
 def _ask(

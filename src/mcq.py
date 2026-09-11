@@ -161,9 +161,16 @@ def generate_questions(
             continue
         if progress:
             done = len(questions)
+            # Name the count, not just the window. "Writing questions for
+            # 9:30–19:30" repeated down the lecture reads as one question per
+            # ten minutes even when the allocation is nothing of the sort: the
+            # windows that get none are skipped silently, so the only ones
+            # anybody sees are the ones that ran. Saying "3 questions" makes the
+            # weighting visible in the one place the user is actually looking.
+            noun = "question" if want == 1 else "questions"
             progress(
                 min(0.95, done / max(1, sum(allocation))),
-                f"Writing questions for {chunk.label}",
+                f"Writing {want} {noun} for {chunk.label}",
             )
 
         avoid = _build_avoid_clause(seen_topics, prior_stems)
